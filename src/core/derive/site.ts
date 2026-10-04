@@ -114,7 +114,7 @@ export function analyzeSite(doc: ProjectDoc, building: BuildingModel, rules: Rul
   void rules;
 
   const parkingProvided =
-    Object.values(site.features).filter((f) => f.kind === 'parking').reduce((n, f) => n + Math.max(1, Number(f.props.spaces ?? 1)), 0);
+    Object.values(site.features).filter((f) => f.kind === 'parking').reduce((n, f) => n + Math.max(0, Number(f.props.spaces ?? 1)), 0);
 
   return {
     plotArea, plotPerimeter: perimeter(boundary), buildable, buildableArea: areaWithHoles(buildable),

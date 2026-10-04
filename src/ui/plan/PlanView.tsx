@@ -17,11 +17,12 @@ import { doorSymbol, windowSymbol, stairSymbol, furnitureSymbol, columnSymbol, p
 import { ASSET_BY_ID } from '../../core/catalog/assets';
 import { formatArea, formatLength, parseLength } from '../../core/units';
 import { type Vec2, add, dist, mid, norm, perp, scale, sub, lineParam, dot, projectToSegment } from '../../core/geometry/vec';
-import { bbox, pointInPolygon } from '../../core/geometry/polygon';
+import { bbox, pointInPolygon, rectPolygon, difference, areaWithHoles, ensureCCW } from '../../core/geometry/polygon';
 import { ROOM_TINT } from './colors';
 import { hitTest, snapPoint, ringD, lineD, dimensionChains, type Snap } from './planUtils';
 import type { BuildingModel, ElementRef, ProjectDoc } from '../../core/model/types';
 import { USER_BY_ID } from '../../core/model/org';
+import { layoutBlock, analyzeBlock, snapBlock, siteSnapRings } from '../../core/generate/blocks';
 import { getMaterial } from '../../core/catalog/materials';
 
 interface ViewState { cx: number; cy: number; z: number }
@@ -39,7 +40,7 @@ export function PlanView({ levelId }: { levelId: string }) {
   const doc = useDoc();
   const rules = useRules();
   const s = useStore();
-  const { selection, tool, layers, snap, proposal, placeAsset, placeRotation, focus } = s;
+  const { selection, tool, layers, snap, proposal, placeAsset, placeRotation, focus, placeBlock } = s;
   const units = doc.meta.units;
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
@@ -86,6 +87,24 @@ export function PlanView({ levelId }: { levelId: string }) {
   const health = useMemo(() => (layers.issues ? validate(doc, activeBuilding(doc), rules) : null), [doc, rules, layers.issues]);
   const isGround = useMemo(() => { const ls = Object.values(b.levels).sort((x, y) => x.order - y.order); return ls.find((l) => l.elevation >= 0)?.id === levelId || ls[0]?.id === levelId; }, [b.levels, levelId]);
   const siteA = useMemo(() => (layers.site && isGround ? { zone: buildableZone(doc.site), analysis: analyzeSite(doc, activeBuilding(doc), rules) } : null), [doc, rules, layers.site, isGround]);
+
+  // ---- ready-made block ghost (shared by click-to-place and drag-and-drop)
+  const blockGhost = useMemo(() => {
+    if (tool !== 'block' || !placeBlock || !cursor || !level) return null;
+    try {
+      const fp = layoutBlock(placeBlock.blockId, placeBlock.size, 0, 0, placeBlock.rotation);
+      const tolB = Math.max(450, 18 / (view?.z ?? 0.05));
+      const sn = snapBlock(b, levelId, fp.w, fp.d, cursor, tolB, fp.def.siteOnly ? siteSnapRings(b, doc.site.boundary) : undefined);
+      const pl = layoutBlock(placeBlock.blockId, placeBlock.size, sn.x, sn.y, placeBlock.rotation);
+      const an = analyzeBlock(b, levelId, pl);
+      // Soft guidance (never blocks the drop): outside the plot, or past the setback line.
+      const rect = rectPolygon(pl.x, pl.y, pl.w, pl.d);
+      const outside = (zone: Parameters<typeof difference>[1]) => areaWithHoles(difference([rect], zone)) > 0.3e6;
+      const warn = outside([ensureCCW(doc.site.boundary)]) ? 'Partly outside the plot'
+        : !pl.def.siteOnly && isGround && outside(buildableZone(doc.site)) ? 'Crosses the setback line' : null;
+      return { pl, an, sn, warn, wrongLevel: !!pl.def.siteOnly && !isGround };
+    } catch { return null; }
+  }, [tool, placeBlock, cursor, b, levelId, view?.z, isGround, level, doc.site]);
 
   // ---- sizing & initial fit
   useEffect(() => {
@@ -182,6 +201,14 @@ export function PlanView({ levelId }: { levelId: string }) {
   const selected = (ref: { kind: string; id: string }) => selection.some((x) => x.kind === ref.kind && x.id === ref.id);
   const rel = (e: React.PointerEvent) => { const r = svgRef.current!.getBoundingClientRect(); return { sx: e.clientX - r.left, sy: e.clientY - r.top }; };
 
+  const dropBlock = () => {
+    const g = blockGhost;
+    if (!g || !placeBlock) return;
+    if (g.wrongLevel) { s.toast('Outdoor spaces go on the ground floor — switch to it first'); return; }
+    if (!g.an.ok) { s.toast(`${g.pl.def.name} ${g.an.reason?.toLowerCase() ?? 'doesn\u2019t fit here'} — drop it next to a room instead`, { kind: 'err' }); return; }
+    if (s.dispatch([{ type: 'block.place', params: { blockId: placeBlock.blockId, size: placeBlock.size, levelId, x: g.pl.x, y: g.pl.y, rotation: g.pl.rot } }])) s.setTool('select');
+  };
+
   const computeSnap = (raw: Vec2, from?: Vec2 | null, exclude?: Set<string>) => snapPoint(raw, dl.walls, tolMm, gridStep, { endpoints: snap.endpoints, grid: snap.grid, from, ortho: snap.ortho, exclude });
 
   const nearestWall = (p: Vec2) => {
@@ -222,6 +249,7 @@ export function PlanView({ levelId }: { levelId: string }) {
       }
       return;
     }
+    if (tool === 'block') { dropBlock(); return; }
     const sn = computeSnap(p, tool === 'wall' ? chain[chain.length - 1] : null);
     if (tool === 'wall') {
       if (!chain.length) { setChain([sn.p]); return; }
@@ -274,7 +302,7 @@ export function PlanView({ levelId }: { levelId: string }) {
       const hit = hitTest(liveDoc, b, dl, p, tolMm, rules, { site: !!siteA, furniture: layers.furniture });
       s.setHover(hit);
       setSnapRes(null);
-    } else if (tool !== 'pan') setSnapRes(computeSnap(p, tool === 'wall' ? chain[chain.length - 1] : null));
+    } else if (tool !== 'pan' && tool !== 'block') setSnapRes(computeSnap(p, tool === 'wall' ? chain[chain.length - 1] : null));
   };
 
   const onPointerUp = () => {
@@ -345,7 +373,10 @@ export function PlanView({ levelId }: { levelId: string }) {
   const cursorClass = drag?.kind === 'pan' || space ? 'panning' : tool === 'select' ? 'tool-select' : 'tool-draw';
 
   return (
-    <div style={{ position: 'absolute', inset: 0 }}>
+    <div style={{ position: 'absolute', inset: 0 }}
+      onDragOver={(e) => { if (!e.dataTransfer.types.includes('text/plinth-block')) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; const r = svgRef.current!.getBoundingClientRect(); setCursor(toWorld(e.clientX - r.left, e.clientY - r.top)); }}
+      onDragLeave={() => setCursor(null)}
+      onDrop={(e) => { if (!e.dataTransfer.types.includes('text/plinth-block')) return; e.preventDefault(); dropBlock(); }}>
       <svg ref={svgRef} className={`plan-svg ${cursorClass}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={() => { setCursor(null); s.setHover(null); }} onDoubleClick={onDoubleClick}
         role="application" aria-label={`Floor plan — ${level.name}`}>
         <g transform={`matrix(${v.z},0,0,${v.z},${tx},${ty})`}>
@@ -407,6 +438,21 @@ export function PlanView({ levelId }: { levelId: string }) {
           )}
           {drag?.kind === 'room' && <rect x={Math.min(drag.start.x, drag.cur.x)} y={-Math.max(drag.start.y, drag.cur.y)} width={Math.abs(drag.cur.x - drag.start.x)} height={Math.abs(drag.cur.y - drag.start.y)} fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
           {drag?.kind === 'marquee' && <rect x={Math.min(drag.start.x, drag.cur.x)} y={-Math.max(drag.start.y, drag.cur.y)} width={Math.abs(drag.cur.x - drag.start.x)} height={Math.abs(drag.cur.y - drag.start.y)} fill="var(--accent-softer)" stroke="var(--accent)" strokeWidth={1} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />}
+          {blockGhost && (() => {
+            const bad = !blockGhost.an.ok || blockGhost.wrongLevel;
+            const stroke = bad ? 'var(--err)' : 'var(--accent)';
+            return (
+              <g style={{ pointerEvents: 'none' }}>
+                {blockGhost.pl.site.map((st, i) => <rect key={`gs${i}`} x={st.rect.x} y={-(st.rect.y + st.rect.h)} width={st.rect.w} height={st.rect.h} fill={st.kind === 'pool' ? '#9fd0dc' : st.kind === 'lawn' ? '#cfe0b8' : st.kind === 'deck' ? '#dcc7a6' : '#e2ded6'} fillOpacity={0.75} stroke={stroke} strokeWidth={1.5} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />)}
+                {blockGhost.pl.parts.map((pt) => <rect key={pt.key} x={pt.rect.x} y={-(pt.rect.y + pt.rect.h)} width={pt.rect.w} height={pt.rect.h} fill={bad ? 'rgba(194,65,58,0.14)' : ROOM_TINT[pt.fn]} fillOpacity={0.8} stroke={stroke} strokeWidth={2} strokeDasharray="7 4" vectorEffect="non-scaling-stroke" />)}
+                <g opacity={0.75}>
+                  {[...blockGhost.pl.props, ...blockGhost.pl.parts.flatMap((pt) => pt.items ?? [])].filter((it) => ASSET_BY_ID[it.asset]).map((it, i) =>
+                    <g key={`gi${i}`}>{prims(furnitureSymbol({ id: `ghost${i}`, levelId, assetId: it.asset, position: it.p, rotation: it.rot, props: {} }), { stroke: bad ? 'var(--err)' : 'var(--ink-2)' })}</g>)}
+                </g>
+                <rect x={blockGhost.pl.x} y={-(blockGhost.pl.y + blockGhost.pl.d)} width={blockGhost.pl.w} height={blockGhost.pl.d} fill="none" stroke={stroke} strokeWidth={2.5} vectorEffect="non-scaling-stroke" />
+              </g>
+            );
+          })()}
           {tool === 'place' && placeAsset && cursor && <g opacity={0.6}>{prims(furnitureSymbol({ id: 'ghost', levelId, assetId: placeAsset, position: snapRes?.p ?? cursor, rotation: placeRotation, props: {} }), { stroke: 'var(--accent)' })}</g>}
           {(tool === 'door' || tool === 'window') && cursor && (() => {
             const w = nearestWall(cursor);
@@ -423,19 +469,110 @@ export function PlanView({ levelId }: { levelId: string }) {
         {dl.rooms.map((r) => {
           const q = toScreen(r.labelPoint);
           const px = Math.min(r.width, r.depth) * v.z;
-          if (px < 34) return null;
-          const big = px > 70;
+          const pr0 = pdl?.rooms.find((x) => x.tagId === r.tagId);
+          const area0 = pr0 && Math.abs(pr0.area - r.area) > 1e4 ? pr0 : r;
+          // Tiny on screen: the area alone, so every room always reports its size.
+          if (px < 34) return px < 16 ? null : <text key={`l${r.id}`} x={q.x} y={q.y + 3} textAnchor="middle" fontSize={8.5} fill="var(--ink-2)" className="num" style={{ pointerEvents: 'none' }}>{formatArea(area0.area, units)}</text>;
+          const big = px > 52;
           const pr = pdl?.rooms.find((x) => x.tagId === r.tagId);
           const area = pr && Math.abs(pr.area - r.area) > 1e4 ? pr : r;
           return (
             <g key={`l${r.id}`} style={{ pointerEvents: 'none' }}>
-              <text x={q.x} y={q.y - (big ? 8 : 2)} textAnchor="middle" fontSize={big ? 11 : 9.5} fontWeight={650} letterSpacing="0.04em" fill={r.tagId ? 'var(--ink)' : 'var(--ink-3)'}>{r.name.toUpperCase()}</text>
-              {big && <text x={q.x} y={q.y + 7} textAnchor="middle" fontSize={10.5} fill="var(--ink-2)" className="num">{r.isRect ? `${formatLength(area.width, units)} × ${formatLength(area.depth, units)}` : 'Irregular'}</text>}
-              {big && <text x={q.x} y={q.y + 20} textAnchor="middle" fontSize={10} fill={area !== r ? 'var(--accent)' : 'var(--ink-3)'} fontWeight={area !== r ? 600 : 400}>{formatArea(area.area, units)}</text>}
+              <text stroke="var(--paper)" strokeWidth={3} strokeLinejoin="round" paintOrder="stroke" x={q.x} y={q.y - (big ? 8 : 2)} textAnchor="middle" fontSize={big ? 11 : 9.5} fontWeight={650} letterSpacing="0.04em" fill={r.tagId ? 'var(--ink)' : 'var(--ink-3)'}>{r.name.toUpperCase()}</text>
+              {!big && <text stroke="var(--paper)" strokeWidth={3} strokeLinejoin="round" paintOrder="stroke" x={q.x} y={q.y + 9} textAnchor="middle" fontSize={9} fill="var(--ink-2)" className="num">{formatArea(area.area, units)}</text>}
+              {big && <text stroke="var(--paper)" strokeWidth={3} strokeLinejoin="round" paintOrder="stroke" x={q.x} y={q.y + 7} textAnchor="middle" fontSize={10.5} fill="var(--ink-2)" className="num">{r.isRect ? `${formatLength(area.width, units)} × ${formatLength(area.depth, units)}` : 'Irregular'}</text>}
+              {big && <text stroke="var(--paper)" strokeWidth={3} strokeLinejoin="round" paintOrder="stroke" x={q.x} y={q.y + 20} textAnchor="middle" fontSize={10} fill={area !== r ? 'var(--accent)' : 'var(--ink-3)'} fontWeight={area !== r ? 600 : 400}>{formatArea(area.area, units)}</text>}
             </g>
           );
         })}
         {stairTexts(Object.values(b.stairs).filter((st) => st.levelId === levelId).flatMap((st) => stairSymbol(computeStair(st, level, rules))))}
+        {layers.dimensions && (() => {
+          // Every wall reports its length. Outer faces are covered by the exterior chains;
+          // other walls get a tag on their room side, placed longest-first so tags never
+          // collide with room labels, site labels or each other (zoom in to reveal more).
+          type Box = { x0: number; y0: number; x1: number; y1: number };
+          const hit = (a: Box, b: Box) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+          const taken: Box[] = [];
+          for (const r of dl.rooms) {
+            const px = Math.min(r.width, r.depth) * v.z;
+            if (px < 16) continue;
+            const q = toScreen(r.labelPoint);
+            const wd = Math.max(r.name.length * 7.4, 74) / 2 + 2, up = px > 52 ? 20 : 12, dn = px > 52 ? 26 : 13;
+            taken.push({ x0: q.x - wd, y0: q.y - up, x1: q.x + wd, y1: q.y + dn });
+          }
+          if (siteA) for (const f of Object.values(doc.site.features)) if (f.polygon && f.polygon.length > 2) {
+            const bb = bbox(f.polygon);
+            const c = toScreen({ x: (bb.minX + bb.maxX) / 2, y: (bb.minY + bb.maxY) / 2 });
+            const nw = (bb.maxX - bb.minX) * v.z < 96, tall = nw && (bb.maxY - bb.minY) > (bb.maxX - bb.minX) * 1.6;
+            taken.push(tall ? { x0: c.x - 8, y0: c.y - 50, x1: c.x + 8, y1: c.y + 50 } : nw ? { x0: c.x - 26, y0: c.y - 8, x1: c.x + 26, y1: c.y + 8 } : { x0: c.x - 48, y0: c.y - 16, x1: c.x + 48, y1: c.y + 14 });
+          }
+          const fp = dl.footprint.length ? bbox(dl.footprint.flat()) : null;
+          const onFace = (w: (typeof dl.walls)[number]) => !!fp && w.kind !== 'interior' && w.kind !== 'partition' && (
+            (Math.abs(w.a.x - w.b.x) < 5 && (Math.abs(w.a.x - fp.minX) < w.thickness || Math.abs(w.a.x - fp.maxX) < w.thickness)) ||
+            (Math.abs(w.a.y - w.b.y) < 5 && (Math.abs(w.a.y - fp.minY) < w.thickness || Math.abs(w.a.y - fp.maxY) < w.thickness)));
+          const out: JSX.Element[] = [];
+          for (const w of [...dl.walls].sort((a, b) => wallLength(b) - wallLength(a))) {
+            if (selWalls.some((x) => x.id === w.id) || onFace(w)) continue;
+            const p = toScreen(w.a), q = toScreen(w.b);
+            if (Math.hypot(q.x - p.x, q.y - p.y) < 48) continue;
+            const n = perp(norm(sub(w.b, w.a)));
+            const m = mid(w.a, w.b);
+            const inRoom = (sg: number) => dl.rooms.some((r) => pointInPolygon(add(m, scale(n, sg * (w.thickness / 2 + 250))), r.polygon));
+            const sg = inRoom(1) ? 1 : inRoom(-1) ? -1 : 1;
+            const face = toScreen(add(m, scale(n, sg * (w.thickness / 2))));
+            const tx = face.x + n.x * sg * 8, ty = face.y - n.y * sg * 8;
+            const ang = (Math.atan2(q.y - p.y, q.x - p.x) * 180) / Math.PI;
+            const rot = ang > 90 || ang < -90 ? ang + 180 : ang;
+            const label = formatLength(wallLength(w), units);
+            const half = label.length * 2.9 + 3;
+            const vert = Math.abs(Math.abs(rot) - 90) < 45;
+            const box = vert ? { x0: tx - 7, y0: ty - half, x1: tx + 7, y1: ty + half } : { x0: tx - half, y0: ty - 7, x1: tx + half, y1: ty + 7 };
+            if (taken.some((t) => hit(t, box))) continue;
+            taken.push(box);
+            out.push(<text key={`wl${w.id}`} x={tx} y={ty} textAnchor="middle" dominantBaseline="central" fontSize={9} fill="var(--ink-3)" stroke="var(--paper)" strokeWidth={3} strokeLinejoin="round" paintOrder="stroke" transform={`rotate(${rot} ${tx} ${ty})`} className="num" style={{ pointerEvents: 'none' }}>{label}</text>);
+          }
+          return out;
+        })()}
+        {layers.dimensions && siteA && (() => {
+          const ring = doc.site.boundary;
+          const ccw = ring.reduce((a, p, i) => { const q = ring[(i + 1) % ring.length]; return a + (p.x * q.y - q.x * p.y); }, 0) > 0;
+          return ring.map((p0, i) => {
+            const q0 = ring[(i + 1) % ring.length];
+            const p = toScreen(p0), q = toScreen(q0);
+            const sl = Math.hypot(q.x - p.x, q.y - p.y);
+            if (sl < 60) return null;
+            const d = norm(sub(q0, p0));
+            const out = ccw ? { x: d.y, y: -d.x } : { x: -d.y, y: d.x };
+            const m = toScreen(mid(p0, q0));
+            const tx = m.x + out.x * 12, ty = m.y - out.y * 12;
+            const ang = (Math.atan2(q.y - p.y, q.x - p.x) * 180) / Math.PI;
+            const rot = ang > 90 || ang < -90 ? ang + 180 : ang;
+            return <text key={`pe${i}`} x={tx} y={ty} textAnchor="middle" dominantBaseline="central" fontSize={10} fontWeight={600} fill="var(--ink-3)" transform={`rotate(${rot} ${tx} ${ty})`} className="num" style={{ pointerEvents: 'none' }}>{formatLength(dist(p0, q0), units)}</text>;
+          });
+        })()}
+        {layers.dimensions && siteA && Object.values(doc.site.features).map((f) => {
+          if (!f.polygon || f.polygon.length < 3) return null;
+          const bb = bbox(f.polygon);
+          const w = bb.maxX - bb.minX, h = bb.maxY - bb.minY;
+          if (Math.min(w, h) * v.z < 26) return null;
+          const c = toScreen({ x: (bb.minX + bb.maxX) / 2, y: (bb.minY + bb.maxY) / 2 });
+          const cars = f.kind === 'parking' ? Number(f.props.spaces ?? 0) : 0;
+          const rect = f.polygon.length === 4 && f.polygon.every((pt) => (Math.abs(pt.x - bb.minX) < 2 || Math.abs(pt.x - bb.maxX) < 2) && (Math.abs(pt.y - bb.minY) < 2 || Math.abs(pt.y - bb.maxY) < 2));
+          const line2 = `${rect ? `${formatLength(w, units, { compact: true })} × ${formatLength(h, units, { compact: true })}` : formatArea(Math.abs(f.polygon.reduce((a, p, i) => { const q = f.polygon![(i + 1) % f.polygon!.length]; return a + (p.x * q.y - q.x * p.y); }, 0)) / 2, units)}${cars ? ` · ${cars} car${cars > 1 ? 's' : ''}` : ''}`;
+          const halo = { stroke: 'var(--paper)', strokeWidth: 3, strokeLinejoin: 'round' as const, paintOrder: 'stroke' };
+          if (w * v.z < 96) {
+            // Narrow on screen: one short line, turned to run along the item if it is tall.
+            const short = cars ? `${cars} car${cars > 1 ? 's' : ''}` : rect ? `${formatLength(w, units, { compact: true })} × ${formatLength(h, units, { compact: true })}` : f.name;
+            const tall = h > w * 1.6 && h * v.z > 70;
+            return <text key={`sf${f.id}`} x={c.x} y={c.y} textAnchor="middle" dominantBaseline="central" fontSize={9} fontWeight={600} fill="var(--ink-2)" {...halo} transform={tall ? `rotate(-90 ${c.x} ${c.y})` : undefined} className="num" style={{ pointerEvents: 'none' }}>{tall && rect ? `${short}${cars ? ` · ${formatLength(w, units, { compact: true })} × ${formatLength(h, units, { compact: true })}` : ''}` : short}</text>;
+          }
+          return (
+            <g key={`sf${f.id}`} style={{ pointerEvents: 'none' }}>
+              <text x={c.x} y={c.y - 4} textAnchor="middle" fontSize={9.5} fontWeight={650} letterSpacing="0.04em" fill="var(--ink-2)" {...halo}>{f.name.toUpperCase()}</text>
+              <text x={c.x} y={c.y + 9} textAnchor="middle" fontSize={9.5} fill="var(--ink-2)" className="num" {...halo}>{line2}</text>
+            </g>
+          );
+        })}
         {layers.dimensions && dimensionChains(dl).map((d, i) => <Dim key={i} a={add(d.a, d.offset)} b={add(d.b, d.offset)} toScreen={toScreen} label={formatLength(dist(d.a, d.b), units)} strong={d.overall} />)}
         {selWalls.map((w) => {
           const n = perp(norm(sub(w.b, w.a)));
@@ -463,6 +600,24 @@ export function PlanView({ levelId }: { levelId: string }) {
         {drag?.kind === 'room' && (() => { const q = toScreen(mid(drag.start, drag.cur)); return <text x={q.x} y={q.y} textAnchor="middle" fontSize={11.5} fontWeight={600} fill="var(--accent)">{formatLength(Math.abs(drag.cur.x - drag.start.x), units)} × {formatLength(Math.abs(drag.cur.y - drag.start.y), units)}</text>; })()}
         {drag?.kind === 'move' && drag.moved && cursor && (() => { const q = toScreen(cursor); const d = sub(drag.cur, drag.start); return <text x={q.x + 14} y={q.y - 12} fontSize={11} fontWeight={600} fill="var(--accent)">Δ {formatLength(Math.hypot(d.x, d.y), units)}</text>; })()}
         {snapRes && snapRes.kind !== 'none' && snapRes.kind !== 'grid' && (() => { const q = toScreen(snapRes.p); return <g style={{ pointerEvents: 'none' }}><rect x={q.x - 5} y={q.y - 5} width={10} height={10} fill="none" stroke="var(--accent)" strokeWidth={1.6} transform={snapRes.kind === 'midpoint' ? `rotate(45 ${q.x} ${q.y})` : undefined} /><text x={q.x + 9} y={q.y + 16} fontSize={10} fill="var(--accent)">{snapRes.kind}</text></g>; })()}
+        {blockGhost && (() => {
+          const g = blockGhost;
+          const tl = toScreen({ x: g.pl.x, y: g.pl.y + g.pl.d });
+          const br = toScreen({ x: g.pl.x + g.pl.w, y: g.pl.y });
+          const bad = !g.an.ok || g.wrongLevel;
+          const ok = g.pl.def.siteOnly ? '✓ Ready to place on the site' : g.an.neighbour ? `✓ Connects to ${g.an.neighbour.name}` : 'Stand-alone — drop it touching a room to connect';
+          const status = g.wrongLevel ? 'Outdoor spaces go on the ground floor' : !g.an.ok ? `✕ ${g.an.reason}` : g.warn ? `⚠ ${g.warn}${g.an.neighbour ? ` · connects to ${g.an.neighbour.name}` : ''}` : ok;
+          const pill = bad ? 'var(--err)' : g.warn ? 'var(--warn)' : 'var(--ink)';
+          const w = Math.max(160, status.length * 6.4 + 24);
+          return (
+            <g style={{ pointerEvents: 'none' }}>
+              {g.pl.parts.map((pt) => { const c = toScreen({ x: pt.rect.x + pt.rect.w / 2, y: pt.rect.y + pt.rect.h / 2 }); const big = Math.min(pt.rect.w, pt.rect.h) * v.z > 40; return big ? <text key={pt.key} x={c.x} y={c.y + 4} textAnchor="middle" fontSize={10.5} fontWeight={650} letterSpacing="0.03em" fill="var(--ink)">{pt.name.toUpperCase()}</text> : null; })}
+              <text x={tl.x} y={tl.y - 8} fontSize={12} fontWeight={650} fill={bad ? 'var(--err)' : 'var(--accent)'} stroke="var(--paper)" strokeWidth={4} strokeLinejoin="round" paintOrder="stroke">{g.pl.def.name} · {formatLength(g.pl.w, units, { compact: true })} × {formatLength(g.pl.d, units, { compact: true })}</text>
+              <rect x={(tl.x + br.x) / 2 - w / 2} y={br.y + 10} width={w} height={22} rx={11} fill={pill} />
+              <text x={(tl.x + br.x) / 2} y={br.y + 25} textAnchor="middle" fontSize={11} fill="#fff" fontWeight={500}>{status}</text>
+            </g>
+          );
+        })()}
         {issues.map((i) => { const q = toScreen(i.point!); const c = i.severity === 'error' ? 'var(--err)' : i.severity === 'warning' ? 'var(--warn)' : 'var(--info)'; if (i.severity === 'info') return null; return (
           <g key={i.id} onPointerDown={(e) => { e.stopPropagation(); s.select(i.refs); }} onMouseEnter={() => setHoverIssue(i.id)} onMouseLeave={() => setHoverIssue(null)} style={{ cursor: 'pointer' }}>
             <circle cx={q.x + 14} cy={q.y - 14} r={7} fill={c} stroke="var(--surface)" strokeWidth={2} /><text x={q.x + 14} y={q.y - 10.5} textAnchor="middle" fontSize={9} fontWeight={700} fill="#fff">!</text>
@@ -490,6 +645,7 @@ export function PlanView({ levelId }: { levelId: string }) {
       {tool === 'room' && <div className="hint">Drag a rectangle to create a room — walls are added only where none exist</div>}
       {(tool === 'door' || tool === 'window') && <div className="hint">Click a wall to place a {tool} · it swings towards the side you click</div>}
       {tool === 'place' && placeAsset && <div className="hint">Click to place {ASSET_BY_ID[placeAsset]?.name} · <span className="kbd">R</span> rotate · <span className="kbd">Esc</span> done</div>}
+      {tool === 'block' && placeBlock && <div className="hint">Move to position · it snaps to nearby walls · click to drop · <span className="kbd">R</span> rotate · <span className="kbd">Esc</span> cancel</div>}
       {tool === 'comment' && <div className="hint">Click anywhere to pin a comment to that spot</div>}
       {drag?.kind === 'edge' && <div className="hint">Resizing — walls, neighbours, openings and areas update together</div>}
       <PlanChrome z={v.z} cursor={cursor} onZoom={(f) => setView({ ...v, z: Math.max(0.004, Math.min(1.2, v.z * f)) })} onFit={fit} />

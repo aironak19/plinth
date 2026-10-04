@@ -1,5 +1,5 @@
 /** Guided project creation: type → site → floors → style → how to start. */
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, X, Sparkles, LayoutTemplate, FileUp, Image as ImageIcon, Box, Square, Check } from 'lucide-react';
 import { useStore } from '../../state/store';
 import { Modal, Seg, Switch, swatchStyle, HealthRing } from '../components';
@@ -17,6 +17,11 @@ import { planThumbnail } from '../plan/thumbnail';
 import { TEMPLATES } from '../../state/seed';
 import { uid } from '../../core/model/ids';
 import { migrate } from '../../state/persist';
+import { BLOCKS } from '../../core/catalog/blocks';
+import { blockPreviewSvg } from '../blocks/blockPreview';
+import { applyOps } from '../../core/ops';
+import { buildableRect } from '../../core/generate/layout';
+import { layoutBlock, analyzeBlock } from '../../core/generate/blocks';
 
 const TYPES: { id: ProjectType; label: string; hint: string }[] = [
   { id: 'villa', label: 'Villa', hint: 'Detached luxury home' }, { id: 'house', label: 'House', hint: 'Individual house' },
@@ -25,7 +30,7 @@ const TYPES: { id: ProjectType; label: string; hint: string }[] = [
   { id: 'renovation', label: 'Renovation', hint: 'Existing building' }, { id: 'blank', label: 'Blank project', hint: 'Start from nothing' },
 ];
 
-type Start = 'blank' | 'ai' | 'template' | 'cad' | 'image' | 'model';
+type Start = 'blank' | 'ai' | 'kit' | 'template' | 'cad' | 'image' | 'model';
 
 export function NewProjectWizard() {
   const open = useStore((s) => s.wizardOpen);
@@ -47,11 +52,21 @@ function Wizard() {
   const [entrance, setEntrance] = useState<Program['entrance']>('south');
   const [floors, setFloors] = useState({ basement: false, ground: true, first: true, second: false, terrace: true });
   const [style, setStyle] = useState<StyleId>('modern');
-  const [start, setStart] = useState<Start>('ai');
+  const [start, setStart] = useState<Start>('kit');
   const [program, setProgram] = useState<Program>({ ...DEFAULT_PROGRAM });
   const [schemes, setSchemes] = useState<{ s: Scheme; score: number; health: number; area: number; thumb: string }[]>([]);
   const [pick, setPick] = useState(0);
   const [template, setTemplate] = useState(TEMPLATES[0].id);
+  const [kit, setKit] = useState('kit-3bhk:S');
+  const kitOptions = useMemo(() => BLOCKS.filter((x) => x.category === 'kits').flatMap((x) => x.sizes.map((sz) => ({ x, sz, id: `${x.id}:${sz.id}` }))), []);
+  const kitFits = (sz: { w: number; d: number }) => { const z = buildableRect(siteFromProgram(units === 'metric' ? w * 1000 : ft(w), units === 'metric' ? d * 1000 : ft(d), 3000, 1500, 1500)); return ft(sz.w) <= z.w - 300 && ft(sz.d) <= z.h - 320; };
+  useEffect(() => {
+    const cur = kitOptions.find((o) => o.id === kit);
+    if (cur && kitFits(cur.sz)) return;
+    const fitting = kitOptions.filter((o) => kitFits(o.sz)).sort((a, b) => b.sz.w * b.sz.d - a.sz.w * a.sz.d);
+    if (fitting[0]) setKit(fitting[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [w, d, units]);
   const [file, setFile] = useState<File | null>(null);
   const [cadInfo, setCadInfo] = useState<string>('');
   const fileRef = useRef<HTMLInputElement>(null);
@@ -112,6 +127,22 @@ function Wizard() {
         for (const [on, n] of names) if (on) { const l = makeLevel({ name: n, elevation: elev, height: n === 'Basement' ? 3000 : 3200, order: order++, slabThickness: n === 'Ground Floor' ? 450 : 150 }); b.levels[l.id] = l; elev += l.height + (n === 'Basement' ? 450 : 0); }
         const top = Object.values(b.levels).sort((x, y) => y.order - x.order)[0];
         if (top && floors.terrace) { const r = makeRoof({ levelId: top.id, kind: 'flat' }, style); b.roofs[r.id] = r; }
+        if (start === 'kit') {
+          const [blockId, size] = kit.split(':');
+          const ground = Object.values(b.levels).find((l) => l.name === 'Ground Floor') ?? top;
+          // A kit is a single-storey home: keep the ground floor and roof it as a terrace.
+          for (const l of Object.values(b.levels)) if (l.id !== ground.id) delete b.levels[l.id];
+          for (const r of Object.values(b.roofs)) delete b.roofs[r.id];
+          const roof = makeRoof({ levelId: ground.id, kind: 'flat' }, style);
+          b.roofs[roof.id] = roof;
+          const z = buildableRect(doc.site);
+          const probe = layoutBlock(blockId, size, 0, 0, 0);
+          const pl = layoutBlock(blockId, size, Math.round(z.x + (z.w - probe.w) / 2), Math.round(z.y + 160), 0);
+          if (pl.w > z.w - 300 || pl.d > z.h - 320 || !analyzeBlock(b, ground.id, pl).ok) { toast('That home is larger than the buildable area of this plot — choose a smaller kit or a bigger plot.', { kind: 'err' }); return; }
+          const placed = applyOps(doc, [{ type: 'block.place', params: { blockId, size, levelId: ground.id, x: pl.x, y: pl.y, rotation: 0 } }], { actor: 'u-ronak', role: 'owner', record: false }).doc;
+          await createProject({ ...placed, activity: [] });
+          return;
+        }
         if (start === 'cad' && file) {
           const { parseDxf, dxfToWalls } = await import('../../core/io/dxf');
           const parsed = parseDxf(await file.text());
@@ -201,7 +232,7 @@ function Wizard() {
         {step === 4 && (
           <div className="col" style={{ gap: 16 }}>
             <div className="grid g3" style={{ gap: 10 }}>
-              {([['ai', 'AI-generated concept', 'Three editable schemes from your brief', <Sparkles key="a" size={16} />], ['blank', 'Blank site', 'Your plot, levels and roof — draw from scratch', <Square key="b" size={16} />], ['template', 'Template', 'Company-standard starting points', <LayoutTemplate key="c" size={16} />], ['cad', 'Import CAD', 'DXF — convert lines to walls', <FileUp key="d" size={16} />], ['image', 'Import image / PDF scan', 'Trace over a sketch or plan', <ImageIcon key="e" size={16} />], ['model', 'Import existing model', 'Plinth project file (.json)', <Box key="f" size={16} />]] as const).map(([id, l, h, ic]) => (
+              {([['kit', 'Ready-made home', 'Pick a 1–4 BHK home and edit it', <LayoutTemplate key="k" size={16} />], ['ai', 'AI-generated concept', 'Three editable schemes from your brief', <Sparkles key="a" size={16} />], ['blank', 'Blank site', 'Your plot, levels and roof — draw from scratch', <Square key="b" size={16} />], ['template', 'Template', 'Company-standard starting points', <LayoutTemplate key="c" size={16} />], ['cad', 'Import CAD', 'DXF — convert lines to walls', <FileUp key="d" size={16} />], ['image', 'Import image / PDF scan', 'Trace over a sketch or plan', <ImageIcon key="e" size={16} />], ['model', 'Import existing model', 'Plinth project file (.json)', <Box key="f" size={16} />]] as const).map(([id, l, h, ic]) => (
                 <button key={id} className="wizard-opt" aria-pressed={start === id} onClick={() => { setStart(id); setFile(null); setCadInfo(''); }}>
                   <div className="row">{ic}<b>{l}</b></div><span className="small muted">{h}</span>
                 </button>
@@ -229,6 +260,20 @@ function Wizard() {
                   </div>
                 )}
                 {!schemes.length && <div className="small muted">Uses your plot ({w} × {d} {units === 'metric' ? 'm' : 'ft'}), {floorCount} floor{floorCount === 1 ? '' : 's'}, {STYLES.find((s) => s.id === style)?.name.toLowerCase()} style and a {entrance}-facing entrance. All three schemes are kept as design options.</div>}
+              </div>
+            )}
+            {start === 'kit' && (
+              <div className="grid g4" style={{ gap: 10 }}>
+                {kitOptions.map(({ x, sz, id }) => {
+                  const fits = kitFits(sz);
+                  return (
+                    <button key={id} className="wizard-opt" aria-pressed={kit === id} onClick={() => setKit(id)} style={{ padding: 8, opacity: fits ? 1 : 0.5 }} title={fits ? '' : 'Larger than this plot’s buildable area'}>
+                      <div style={{ aspectRatio: '1', background: 'var(--paper)', borderRadius: 6, padding: 4 }} dangerouslySetInnerHTML={{ __html: blockPreviewSvg(x.id, sz.id) }} />
+                      <b className="small">{x.name.replace(' single-storey villa', ' villa')}</b>
+                      <span className="tiny muted">{sz.label} · {sz.w} × {sz.d} ft{fits ? '' : ' · too big'}</span>
+                    </button>
+                  );
+                })}
               </div>
             )}
             {start === 'template' && (
@@ -271,7 +316,7 @@ function PlotPreview({ w, d, entrance }: { w: number; d: number; entrance: strin
   return (
     <svg viewBox={`-20 -20 ${w * s + 40} ${d * s + 60}`} style={{ width: '100%', maxHeight: 300 }} aria-label="Plot preview">
       <rect x={0} y={0} width={w * s} height={d * s} fill="var(--accent-softer)" stroke="var(--ink-2)" strokeWidth={1.5} strokeDasharray="6 3" />
-      <rect x={r.sideSetback * s} y={r.rearSetback * s} width={(w - 2 * r.sideSetback) * s} height={(d - r.frontSetback - r.rearSetback) * s} fill="none" stroke="var(--accent)" strokeWidth={1} />
+      <rect x={r.sideSetback * s} y={r.rearSetback * s} width={Math.max(0, (w - 2 * r.sideSetback) * s)} height={Math.max(0, (d - r.frontSetback - r.rearSetback) * s)} fill="none" stroke="var(--accent)" strokeWidth={1} />
       <text x={(w * s) / 2} y={d * s + 18} textAnchor="middle" fontSize={11} fill="var(--ink-3)">Road · entrance faces {entrance}</text>
       <text x={(w * s) / 2} y={(d * s) / 2} textAnchor="middle" fontSize={11} fill="var(--accent)">Buildable zone</text>
     </svg>

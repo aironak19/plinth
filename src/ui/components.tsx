@@ -188,7 +188,15 @@ export function Empty({ icon, title, children }: { icon?: ReactNode; title: stri
 
 /** Phone-sized layouts focus on viewing, reviewing and commenting. */
 export function useIsMobile(): boolean {
-  const q = '(max-width: 760px)';
+  return useMedia('(max-width: 760px)');
+}
+
+/** Tablet / small-laptop widths: panels give the plan room. */
+export function useIsNarrow(): boolean {
+  return useMedia('(max-width: 1100px)');
+}
+
+function useMedia(q: string): boolean {
   const [m, setM] = useState(() => typeof window !== 'undefined' && window.matchMedia(q).matches);
   useEffect(() => {
     const mq = window.matchMedia(q);

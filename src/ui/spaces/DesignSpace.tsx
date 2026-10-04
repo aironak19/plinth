@@ -1,20 +1,24 @@
 /** Design workspace: levels & browser · plan / 3D / split canvas · contextual inspector or Architect AI. */
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import {
   MousePointer2, BrickWall, Square, DoorOpen, AppWindow, Footprints, Columns3, Sofa, MessageSquare, Map, Box, SquareSplitHorizontal,
-  Eye, EyeOff, Lock, LockOpen, Plus, RotateCw, Copy, Trash, Scissors, ArrowLeftRight, Palette, Sparkles, ChevronRight, Layers, Undo2, Redo2,
+  Eye, EyeOff, Lock, LockOpen, Plus, RotateCw, Copy, Trash, Scissors, ArrowLeftRight, Palette, Sparkles, ChevronRight, Layers, Undo2, Redo2, LayoutGrid, Home, Wand,
 } from 'lucide-react';
 import { useStore, type Tool } from '../../state/store';
 import { useBuilding, useDoc, useLevels, useDerivedLevel, useHealth, useUnits } from '../../state/derived';
 import { PlanView } from '../plan/PlanView';
 import { Inspector } from '../inspector/Inspector';
 import { AIPanel } from '../ai/AIPanel';
-import { Kbd, LengthInput, Switch, useIsMobile } from '../components';
+import { Kbd, LengthInput, Switch, useIsMobile, useIsNarrow } from '../components';
 import { formatArea } from '../../core/units';
 import { ROOM_TINT } from '../plan/colors';
 import { ASSET_BY_ID } from '../../core/catalog/assets';
 import type { ElementRef } from '../../core/model/types';
 import { wallLength } from '../../core/model/query';
+import { BlockLibrary } from '../blocks/BlockLibrary';
+import { findAttachPosition } from '../../core/ops/blocks';
+import { BLOCK_BY_ID } from '../../core/catalog/blocks';
+import type { RoomFunction } from '../../core/model/types';
 
 const Viewport3D = lazy(() => import('../three/Viewport3D'));
 const LibraryPicker = lazy(() => import('./LibrarySpace').then((m) => ({ default: m.FurniturePicker })));
@@ -26,8 +30,15 @@ export function DesignSpace() {
   const levels = useLevels();
   const lid = levelId && levels.some((l) => l.id === levelId) ? levelId : levels[0]?.id;
   const mobile = useIsMobile();
+  const narrow = useIsNarrow();
   const hasSelection = useStore((s) => s.selection.length > 0);
   const [leftOpen, setLeftOpen] = useState(!mobile);
+  const leftTab = useStore((s) => s.leftTab);
+  const tool = useStore((s) => s.tool);
+  const emptyLevel = useDerivedLevel(lid ?? null)?.walls.length === 0;
+  useEffect(() => { if (!mobile) setLeftOpen(true); }, [leftTab, mobile]);
+  useEffect(() => { if (narrow && tool === 'block') setLeftOpen(false); }, [tool, narrow]);
+  useEffect(() => { const h = () => setLeftOpen(true); window.addEventListener('plinth:openleft', h); return () => window.removeEventListener('plinth:openleft', h); }, []);
   return (
     <>
       {leftOpen && <LeftPanel levelId={lid} onClose={() => setLeftOpen(false)} />}
@@ -39,9 +50,10 @@ export function DesignSpace() {
         {view !== '3d' && !mobile && <Toolbar />}
         <ContextBar />
         <ProposalBanner />
+        {emptyLevel && tool !== 'block' && view !== '3d' && <EmptyGuide />}
         {!leftOpen && <button className="floating btn ghost" style={{ top: 12, left: 12, height: 34 }} onClick={() => setLeftOpen(true)}><Layers size={15} /> Levels</button>}
       </div>
-      {aiOpen ? <AIPanel /> : (!mobile || hasSelection) && <Inspector />}
+      {aiOpen ? <AIPanel /> : (!narrow || hasSelection) && <Inspector />}
     </>
   );
 }
@@ -68,8 +80,11 @@ function Toolbar() {
   const tool = useStore((s) => s.tool);
   const setTool = useStore((s) => s.setTool);
   const placeAsset = useStore((s) => s.placeAsset);
+  const simple = useStore((s) => s.simpleMode);
+  const setSimple = useStore((s) => s.setSimpleMode);
+  const set = useStore((s) => s.set);
   const [picker, setPicker] = useState(false);
-  const tools: { id: Tool; icon: React.ReactNode; label: string; key: string }[] = [
+  const all: { id: Tool; icon: React.ReactNode; label: string; key: string }[] = [
     { id: 'select', icon: <MousePointer2 size={17} />, label: 'Select', key: 'V' },
     { id: 'wall', icon: <BrickWall size={17} />, label: 'Wall', key: 'W' },
     { id: 'room', icon: <Square size={17} />, label: 'Room', key: 'R' },
@@ -78,9 +93,14 @@ function Toolbar() {
     { id: 'stair', icon: <Footprints size={17} />, label: 'Stair', key: 'S' },
     { id: 'column', icon: <Columns3 size={17} />, label: 'Column', key: 'O' },
   ];
+  const tools = simple ? all.filter((t) => t.id === 'select' || t.id === 'door' || t.id === 'window') : all;
   return (
     <>
       <div className="floating toolbar" role="toolbar" aria-label="Drawing tools">
+        <button aria-pressed={tool === 'block'} aria-label="Add a ready-made space" onClick={() => { set('leftTab', 'add'); window.dispatchEvent(new Event('plinth:openleft')); }} style={{ background: tool === 'block' ? undefined : 'var(--accent)', color: tool === 'block' ? undefined : '#fff' }}>
+          <LayoutGrid size={17} /> <span className="small">Add space</span><span className="tip">Rooms, suites, kitchens, stairs, home kits</span>
+        </button>
+        <span className="sep" />
         {tools.map((t) => (
           <button key={t.id} aria-pressed={tool === t.id} aria-label={`${t.label} (${t.key})`} onClick={() => setTool(t.id)}>
             {t.icon}<span className="tip">{t.label} <Kbd>{t.key}</Kbd></span>
@@ -91,6 +111,11 @@ function Toolbar() {
           <Sofa size={17} />{tool === 'place' && placeAsset ? <span className="small">{ASSET_BY_ID[placeAsset]?.name}</span> : null}<span className="tip">Furniture & objects</span>
         </button>
         <button aria-pressed={tool === 'comment'} aria-label="Comment (K)" onClick={() => setTool('comment')}><MessageSquare size={17} /><span className="tip">Comment <Kbd>K</Kbd></span></button>
+        <span className="sep" />
+        <div className="seg" style={{ background: 'transparent' }}>
+          <button aria-pressed={simple} onClick={() => setSimple(true)} title="Simple — ready-made spaces, doors, windows and furniture">Simple</button>
+          <button aria-pressed={!simple} onClick={() => setSimple(false)} title="Pro — every drafting tool: walls, rooms, stairs, columns">Pro</button>
+        </div>
       </div>
       {picker && (
         <div className="floating" style={{ bottom: 70, left: '50%', transform: 'translateX(-50%)', width: 560, maxHeight: 360, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -136,8 +161,19 @@ function ContextBar() {
     title = ASSET_BY_ID[b.furniture[one.id].assetId]?.name ?? 'Item';
     body = <><button onClick={() => act([{ type: 'element.rotate', params: { refs: [one], angle: 90 } }])}><RotateCw size={14} /> Rotate</button><button onClick={() => set('aiOpen', false)}><Palette size={14} /> Material</button>{dup}{del}</>;
   } else if (one?.kind === 'room' && b.rooms[one.id]) {
-    title = b.rooms[one.id].name;
-    body = <><button onClick={() => window.dispatchEvent(new CustomEvent('plinth:rename'))}>Rename</button><button onClick={() => set('aiOpen', false)}><Palette size={14} /> Finishes</button><button onClick={() => { set('aiOpen', true); setTimeout(() => window.dispatchEvent(new CustomEvent('plinth:ask', { detail: `Make the ${b.rooms[one.id].name} 2 ft wider` })), 50); }}><Sparkles size={14} /> Make larger</button>{del}</>;
+    const tag = b.rooms[one.id];
+    title = tag.name;
+    const quick = QUICK_ADD[tag.fn] ?? [];
+    body = (
+      <>
+        {quick.map(([blockId, size, label]) => <button key={blockId} onClick={() => attach(b, tag.levelId, tag.id, tag.name, blockId, size)} title={`Add ${BLOCK_BY_ID[blockId]?.name.toLowerCase()} next to ${tag.name}`}><Plus size={13} /> {label}</button>)}
+        {quick.length > 0 && <span className="sep" />}
+        <button onClick={() => window.dispatchEvent(new CustomEvent('plinth:rename'))}>Rename</button>
+        <button onClick={() => set('aiOpen', false)}><Palette size={14} /> Finishes</button>
+        <button onClick={() => { set('aiOpen', true); setTimeout(() => window.dispatchEvent(new CustomEvent('plinth:ask', { detail: `Make the ${tag.name} 2 ft wider` })), 50); }}><Sparkles size={14} /> Larger</button>
+        {del}
+      </>
+    );
   } else if (one && (one.kind === 'door' || one.kind === 'window')) {
     const o = one.kind === 'door' ? b.doors[one.id] : b.windows[one.id];
     if (!o) return null;
@@ -160,6 +196,46 @@ function ContextBar() {
   return (
     <div className="floating ctxbar" role="toolbar" aria-label="Selection actions">
       <span className="title">{title}</span><span className="sep" />{body}
+    </div>
+  );
+}
+
+/** One-click additions that make sense next to each kind of room. */
+const QUICK_ADD: Partial<Record<RoomFunction, [string, string, string][]>> = {
+  master_bedroom: [['bath', 'M', 'Attached bath'], ['walkin', 'S', 'Walk-in'], ['balcony', 'M', 'Balcony']],
+  bedroom: [['bath', 'S', 'Attached bath'], ['walkin', 'S', 'Walk-in'], ['balcony', 'M', 'Balcony']],
+  living: [['balcony', 'L', 'Balcony'], ['powder', 'M', 'Powder room'], ['dining', 'M', 'Dining']],
+  family: [['bedroom-bath', 'M', 'Bedroom + bath'], ['balcony', 'M', 'Balcony'], ['bath', 'S', 'Bath']],
+  dining: [['kitchen-l', 'M', 'Kitchen'], ['balcony', 'M', 'Balcony']],
+  kitchen: [['utility', 'S', 'Utility'], ['store', 'S', 'Store'], ['dining', 'M', 'Dining']],
+  corridor: [['bedroom-bath', 'M', 'Bedroom + bath'], ['bath', 'S', 'Bath'], ['office', 'S', 'Office']],
+  foyer: [['living', 'M', 'Living'], ['powder', 'S', 'Powder room'], ['pooja', 'S', 'Pooja']],
+  study: [['bath', 'S', 'Bath'], ['balcony', 'S', 'Balcony']],
+  stair: [['corridor', 'S', 'Passage'], ['family', 'S', 'Lounge']],
+};
+
+function attach(b: ReturnType<typeof useBuilding>, levelId: string, tagId: string, name: string, blockId: string, size: string) {
+  const s = useStore.getState();
+  const pos = findAttachPosition(b, levelId, tagId, blockId, size, s.doc?.site.boundary);
+  if (!pos) { s.toast(`There’s no free outside wall next to ${name} for that — drag one in from Add instead`); s.set('leftTab', 'add'); return; }
+  s.dispatch([{ type: 'block.place', params: { blockId, size, levelId, ...pos } }]);
+}
+
+/** First-run guide on an empty level — three ways to start, no CAD knowledge needed. */
+function EmptyGuide() {
+  const set = useStore((s) => s.set);
+  const start = (cat: string) => { set('leftTab', 'add'); window.dispatchEvent(new Event('plinth:openleft')); setTimeout(() => window.dispatchEvent(new CustomEvent('plinth:blockcat', { detail: cat })), 60); };
+  return (
+    <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none', zIndex: 5 }}>
+      <div className="card" style={{ pointerEvents: 'auto', width: 'min(620px, 92%)', padding: 24, boxShadow: 'var(--shadow-lg)' }}>
+        <div style={{ fontSize: 20, fontWeight: 650, letterSpacing: '-0.015em' }}>Let’s design your home</div>
+        <div className="small muted" style={{ margin: '4px 0 18px' }}>No drawing skills needed. Rooms snap together, and doors, windows and furniture are added for you. You can change anything later.</div>
+        <div className="grid g3" style={{ gap: 10 }}>
+          <button className="wizard-opt" onClick={() => start('kits')}><Home size={18} style={{ color: 'var(--accent)' }} /><b>Start from a ready-made home</b><span className="small muted">1–4 BHK homes. Drop one in, then adjust.</span></button>
+          <button className="wizard-opt" onClick={() => start('bedrooms')}><LayoutGrid size={18} style={{ color: 'var(--accent)' }} /><b>Add rooms one by one</b><span className="small muted">Drag bedrooms, kitchens, baths and more onto the grid.</span></button>
+          <button className="wizard-opt" onClick={() => { set('aiOpen', true); setTimeout(() => window.dispatchEvent(new CustomEvent('plinth:ask', { detail: 'Create a 3 bedroom home on this plot with a pooja room, 2-car parking and a garden' })), 80); }}><Wand size={18} style={{ color: 'var(--accent)' }} /><b>Describe it to Architect AI</b><span className="small muted">“3 bedrooms, pooja room, parking…” — get three options.</span></button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -194,17 +270,24 @@ function LeftPanel({ levelId, onClose }: { levelId?: string; onClose: () => void
   const units = useUnits();
   const dl = useDerivedLevel(levelId ?? null);
   const health = useHealth();
-  const [tab, setTab] = useState<'levels' | 'layers'>('levels');
+  const tab = useStore((s) => s.leftTab);
+  const setTab = (t: 'add' | 'levels' | 'layers') => set('leftTab', t);
   const sel = (r: ElementRef) => selection.some((x) => x.id === r.id);
   return (
-    <aside className="panel" aria-label="Levels and project browser">
+    <aside className="panel" aria-label="Levels and project browser" style={tab === 'add' ? { width: 340 } : undefined}>
       <div className="panel-tabs" role="tablist">
+        <button role="tab" aria-selected={tab === 'add'} onClick={() => setTab('add')}><Plus size={13} /> Add</button>
         <button role="tab" aria-selected={tab === 'levels'} onClick={() => setTab('levels')}>Levels & rooms</button>
         <button role="tab" aria-selected={tab === 'layers'} onClick={() => setTab('layers')}>Layers</button>
         <button className="btn ghost icon sm" style={{ flex: 'none' }} onClick={onClose} aria-label="Collapse panel">‹</button>
       </div>
       <div className="panel-body">
-        {tab === 'levels' ? (
+        {tab === 'add' ? (
+          <>
+            <div className="row tiny muted" style={{ marginBottom: 8 }}>Adding to <b style={{ color: 'var(--ink)', marginLeft: 4 }}>{levels.find((l) => l.id === levelId)?.name}</b><span className="spacer" />{levels.length > 1 && <select className="select" style={{ width: 130, height: 24, fontSize: 11 }} value={levelId} onChange={(e) => setLevel(e.target.value)} aria-label="Level">{levels.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select>}</div>
+            <BlockLibrary />
+          </>
+        ) : tab === 'levels' ? (
           <>
             <div className="panel-section">
               <div className="row" style={{ marginBottom: 6 }}><span className="caps grow">Levels</span><button className="btn ghost icon sm" aria-label="Add level" onClick={() => { const names = ['Ground Floor', 'First Floor', 'Second Floor', 'Third Floor']; dispatch([{ type: 'level.create', params: { name: names[levels.length] ?? `Level ${levels.length}`, copyExteriorFrom: levels[levels.length - 1]?.id } }]); }}><Plus size={14} /></button></div>

@@ -112,6 +112,13 @@ function useShortcuts() {
         return;
       }
       const k = e.key.toLowerCase();
+      if ((s.tool === 'block' && s.placeBlock) || s.tool === 'place') {
+        if (k === 'r' || k === ']') {
+          if (s.tool === 'block' && s.placeBlock) s.set('placeBlock', { ...s.placeBlock, rotation: (s.placeBlock.rotation + 90) % 360 });
+          else s.set('placeRotation', (s.placeRotation + 90) % 360);
+          return;
+        }
+      }
       const sc = s.shortcuts;
       const inDesign = s.route.space === 'design';
       const goDesign = () => { if (!inDesign) s.navigate({ name: 'project', id: s.doc!.id, space: 'design' }); };

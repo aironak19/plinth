@@ -162,11 +162,11 @@ export function buildFromSpec(spec: BuildingSpec): BuildingModel {
 
 // ---------------------------------------------------------------- helpers
 
-function along(w: Wall, axis: 'x' | 'y') {
+export function along(w: Wall, axis: 'x' | 'y') {
   return axis === 'y' ? Math.abs(w.a.y - w.b.y) < TOL : Math.abs(w.a.x - w.b.x) < TOL;
 }
 
-function onSegment(p: Vec2, w: Wall) {
+export function onSegment(p: Vec2, w: Wall) {
   const minX = Math.min(w.a.x, w.b.x) - TOL, maxX = Math.max(w.a.x, w.b.x) + TOL;
   const minY = Math.min(w.a.y, w.b.y) - TOL, maxY = Math.max(w.a.y, w.b.y) + TOL;
   return p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY;
@@ -212,7 +212,7 @@ function seg(axis: 'x' | 'y', c: number, iv: { lo: number; hi: number; ext: bool
   return axis === 'y' ? { a: { x: iv.lo, y: c }, b: { x: iv.hi, y: c }, ext: iv.ext } : { a: { x: c, y: iv.lo }, b: { x: c, y: iv.hi }, ext: iv.ext };
 }
 
-function sharedEdge(A: RoomSpec, B: RoomSpec): { axis: 'x' | 'y'; c: number; lo: number; hi: number; sideA: Side } | null {
+export function sharedEdge(A: RoomSpec, B: RoomSpec): { axis: 'x' | 'y'; c: number; lo: number; hi: number; sideA: Side } | null {
   const ox = [Math.max(A.x, B.x), Math.min(A.x + A.w, B.x + B.w)];
   const oy = [Math.max(A.y, B.y), Math.min(A.y + A.h, B.y + B.h)];
   if (Math.abs(A.y + A.h - B.y) < TOL && ox[1] - ox[0] > 600) return { axis: 'y', c: B.y, lo: ox[0], hi: ox[1], sideA: 'n' };
@@ -227,7 +227,7 @@ export function roomsAdjacent(A: RoomSpec, B: RoomSpec, min = 1000): boolean {
   return !!e && e.hi - e.lo >= min;
 }
 
-function roomEdges(r: RoomSpec) {
+export function roomEdges(r: RoomSpec) {
   return [
     { side: 's' as Side, axis: 'y' as const, c: r.y, lo: r.x, hi: r.x + r.w, len: r.w, mid: { x: r.x + r.w / 2, y: r.y } },
     { side: 'n' as Side, axis: 'y' as const, c: r.y + r.h, lo: r.x, hi: r.x + r.w, len: r.w, mid: { x: r.x + r.w / 2, y: r.y + r.h } },
@@ -236,7 +236,7 @@ function roomEdges(r: RoomSpec) {
   ];
 }
 
-function freeIntervals(lo: number, hi: number, blocked: [number, number][]): [number, number][] {
+export function freeIntervals(lo: number, hi: number, blocked: [number, number][]): [number, number][] {
   let free: [number, number][] = [[lo, hi]];
   for (const [b0, b1] of blocked) {
     free = free.flatMap(([a0, a1]) => {
@@ -252,9 +252,37 @@ function freeIntervals(lo: number, hi: number, blocked: [number, number][]): [nu
 
 // ------------------------------------------------------------- furnishing
 
-const ROT: Record<Side, number> = { n: 0, s: 180, e: -90, w: 90 };
+export const ROT: Record<Side, number> = { n: 0, s: 180, e: -90, w: 90 };
 
-function furnish(b: BuildingModel, levelId: Id, r: RoomSpec, doors: { side: Side; at: number; width: number }[], style: StyleId) {
+/** Place an asset against one wall of a rectangular room (inset from the wall centre-lines). */
+export function placeAgainst(b: BuildingModel, levelId: Id, r: { x: number; y: number; w: number; h: number }, side: Side | 'center', assetId: string, along = 0.5, gap = 0, rotExtra = 0, style: StyleId = 'modern'): boolean {
+  const a = ASSET_BY_ID[assetId];
+  if (!a) return false;
+  const st = STYLE_BY_ID[style];
+  const inset = INT_WALL / 2 + 60;
+  const x0 = r.x + inset, x1 = r.x + r.w - inset, y0 = r.y + inset, y1 = r.y + r.h - inset;
+  const W = x1 - x0, H = y1 - y0;
+  let x: number, y: number, rot: number;
+  if (side === 'center') {
+    const fw = rotExtra % 180 === 0 ? a.size.w : a.size.d, fd = rotExtra % 180 === 0 ? a.size.d : a.size.w;
+    if (fw > W || fd > H) return false;
+    x = x0 + fw / 2 + (W - fw) * along; y = (y0 + y1) / 2 + gap; rot = rotExtra;
+  } else {
+    const horizontal = side === 'n' || side === 's';
+    const depth = a.size.d, width = a.size.w;
+    if ((horizontal ? width : depth) > (horizontal ? W : H) + 1 || (horizontal ? depth : width) > (horizontal ? H : W) + 1) return false;
+    if (side === 'n') { x = x0 + width / 2 + (W - width) * along; y = y1 - depth / 2 - gap; }
+    else if (side === 's') { x = x0 + width / 2 + (W - width) * along; y = y0 + depth / 2 + gap; }
+    else if (side === 'e') { y = y0 + width / 2 + (H - width) * along; x = x1 - depth / 2 - gap; }
+    else { y = y0 + width / 2 + (H - width) * along; x = x0 + depth / 2 + gap; }
+    rot = ROT[side] + rotExtra;
+  }
+  const f = makeFurniture({ levelId, assetId, position: { x, y }, rotation: rot, variant: a.variants.some((v) => v.id === st.furnitureVariant) ? st.furnitureVariant : undefined });
+  b.furniture[f.id] = f;
+  return true;
+}
+
+export function furnish(b: BuildingModel, levelId: Id, r: RoomSpec, doors: { side: Side; at: number; width: number }[], style: StyleId) {
   const st = STYLE_BY_ID[style];
   const inset = INT_WALL / 2 + 60;
   const x0 = r.x + inset, x1 = r.x + r.w - inset, y0 = r.y + inset, y1 = r.y + r.h - inset;

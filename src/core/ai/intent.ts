@@ -21,6 +21,10 @@ import { STYLES, STYLE_BY_ID } from '../catalog/styles';
 import { formatArea, formatLength, formatMoneyCompact, ft, parseLength, MM2_PER_SQFT, MM2_PER_M2 } from '../units';
 import { generateSchemes, DEFAULT_PROGRAM, type Program, type Scheme, siteFromProgram } from '../generate/layout';
 import { dist, sub } from '../geometry/vec';
+import { searchBlocks } from '../catalog/blocks';
+import { findAttachPosition, findSitePosition } from '../ops/blocks';
+import { layoutBlock, analyzeBlock } from '../generate/blocks';
+import { buildableRect } from '../generate/layout';
 
 export interface Proposal {
   kind: 'change' | 'answer' | 'options' | 'clarify';
@@ -270,6 +274,46 @@ export function interpret(input: string, doc: ProjectDoc, selection: ElementRef[
     return { kind: 'change', title: 'Add level', message: `Add ${names[n] ?? `Level ${n}`} on top, copying the exterior walls of ${top.name}. The roof moves up automatically.`, ops: [{ type: 'level.create', params: { name: names[n] ?? `Level ${n}`, copyExteriorFrom: top.id } }] };
   }
 
+  // ---- ready-made blocks: "add a master suite next to the landing", "add a 3bhk home"
+  const blk = t.match(/\badd (?:a |an |another |one )?(.+?)(?:\s+(?:next to|near|beside|off|adjoining|attached to|connected to|to)\s+(?:the )?(.+))?$/);
+  if (blk) {
+    const phrase = blk[1].replace(/\b(room|space)\b$/, '')
+      .replace(/\b(?:for |with )?(?:\d|one|single|two|double|three|four)[- ]?(car|bike|scooter|two[- ]wheeler)s?\b/, '$1').replace(/\s+/g, ' ').trim();
+    const def = searchBlocks(phrase)[0];
+    const strong = def && (def.name.toLowerCase().includes(phrase) || def.keywords.some((k) => phrase.includes(k) || k.includes(phrase)));
+    if (def && strong) {
+      const size = /\b(small|compact|cozy)\b/.test(t) ? 'S' : /\b(large|big|spacious|luxury|grand)\b/.test(t) ? 'L' : undefined;
+      // "2 car parking", "parking for 3 cars", "4 bike parking" pick the size by its count.
+      const WORDS: Record<string, string> = { one: '1', single: '1', two: '2', double: '2', three: '3', four: '4' };
+      const cnt = t.match(/\b(\d|one|single|two|double|three|four)[- ]?(?:car|cars|bike|bikes|scooters?|two[- ]wheelers?)\b/)?.[1];
+      const n = cnt ? WORDS[cnt] ?? cnt : null;
+      const byCount = n ? def.sizes.find((x) => x.label.startsWith(`${n} `)) : undefined;
+      const sizeId = byCount?.id ?? def.sizes.find((x) => x.id === size)?.id ?? def.sizes[Math.min(1, def.sizes.length - 1)].id;
+      const levelIdNow = levelId ?? levelsSorted(b)[0]?.id;
+      const host = blk[2] ? resolveRoom(blk[2], c) : (selection.find((x) => x.kind === 'room') ? resolveRoom('this room', c) : undefined);
+      if (def.siteOnly) {
+        const ground = levelsSorted(b)[0];
+        const sz = def.sizes.find((x) => x.id === sizeId)!;
+        const hostRoom = host?.tagId ? deriveLevel(b, host.levelId).rooms.find((r) => r.tagId === host.tagId) : undefined;
+        const near = hostRoom ? hostRoom.polygon.reduce((a, p) => ({ x: a.x + p.x / hostRoom.polygon.length, y: a.y + p.y / hostRoom.polygon.length }), { x: 0, y: 0 }) : undefined;
+        const pos = ground ? findSitePosition(doc, b, def.id, sizeId, near) : null;
+        if (!pos) return { kind: 'answer', title: 'No free space on the plot', message: `There isn’t a clear ${L(ft(sz.w))} × ${L(ft(sz.d))} patch on the plot for ${def.name.toLowerCase()} (${sz.label.toLowerCase()}). Try a smaller size, or move the building.` };
+        return { kind: 'change', title: `Add ${def.name.toLowerCase()}`, message: `Add ${def.name.toLowerCase()} — ${sz.label.toLowerCase()}, ${L(ft(sz.w))} × ${L(ft(sz.d))} — on the site${near ? ` near ${host!.name}` : ' close to the road'}, clear of the building.${def.category === 'parking' ? ' It counts towards required parking.' : ''}`, ops: [{ type: 'block.place', params: { blockId: def.id, size: sizeId, levelId: ground!.id, ...pos } }] };
+      }
+      if (host?.tagId) {
+        const pos = findAttachPosition(b, host.levelId, host.tagId, def.id, sizeId, doc.site.boundary);
+        if (!pos) return { kind: 'answer', title: 'No room for it there', message: `There’s no free outside wall next to ${host.name} for a ${def.name.toLowerCase()}. Try a smaller size, or drag one from Add spaces.` };
+        return { kind: 'change', title: `Add ${def.name.toLowerCase()}`, message: `Add a ${def.sizes.find((x) => x.id === sizeId)?.label.toLowerCase()} ${def.name.toLowerCase()} next to ${host.name}. It shares walls with what’s there, connects with a door, and comes with windows and furniture.`, ops: [{ type: 'block.place', params: { blockId: def.id, size: sizeId, levelId: host.levelId, ...pos } }], highlight: [{ kind: 'room', id: host.tagId }] };
+      }
+      if (def.category === 'kits' && levelIdNow) {
+        const z = buildableRect(doc.site);
+        const pl = layoutBlock(def.id, sizeId, z.x + 300, z.y + 300, 0);
+        if (analyzeBlock(b, levelIdNow, pl).ok) return { kind: 'change', title: `Add ${def.name}`, message: `Place a ${def.name} (${L(pl.w)} × ${L(pl.d)}) at the front of the buildable zone. Every room is editable afterwards.`, ops: [{ type: 'block.place', params: { blockId: def.id, size: sizeId, levelId: levelIdNow, x: pl.x, y: pl.y, rotation: 0 } }] };
+      }
+      if (!/(powder|toilet|store|pooja|puja|study|walk-?in|bath)/.test(phrase)) return { kind: 'clarify', title: `Where should the ${def.name.toLowerCase()} go?`, message: `Say which room it should sit next to — e.g. “add a ${def.name.toLowerCase()} next to the living room” — or drag it from Add spaces.` };
+    }
+  }
+
   // ---- resize rooms
   const resizeVerb = /\b(larger|bigger|wider|smaller|narrower|deeper|longer|shorter|increase|decrease|expand|enlarge|shrink|extend|resize|width|depth|wide|deep)\b/;
   if (resizeVerb.test(t)) {
@@ -346,6 +390,7 @@ export const SUGGESTIONS = [
   'Create three alternative layouts',
   'Use italian marble in the living room',
   'Reduce the construction cost',
+  'Add a master suite next to the landing',
   'Create a 4 bedroom villa on a 40 × 60 ft plot, G+1, pooja room, 2-car parking, garden, swimming pool, south-facing entrance',
 ];
 

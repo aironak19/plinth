@@ -139,7 +139,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .panel-section:first-child { padding-top: 0; }
 .panel-section:last-child { border-bottom: 0; }
 .panel-tabs { display: flex; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--line); flex: none; }
-.panel-tabs button { flex: 1; height: 28px; border: 0; background: transparent; border-radius: var(--r-sm); color: var(--ink-3); font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.panel-tabs button { flex: 1; white-space: nowrap; padding: 0 6px; height: 28px; border: 0; background: transparent; border-radius: var(--r-sm); color: var(--ink-3); font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .panel-tabs button[aria-selected='true'] { background: var(--surface-active); color: var(--ink); }
 
 .list-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--r-sm); cursor: pointer; min-height: 30px; }
@@ -149,7 +149,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 /* ------------------------------------------------------------- canvas */
 .canvas-wrap { flex: 1; position: relative; min-width: 0; background: var(--paper); overflow: hidden; }
 .canvas-wrap.split { display: grid; grid-template-columns: 1fr 1fr; }
-.canvas-pane { position: relative; min-width: 0; overflow: hidden; }
+.canvas-pane { position: relative; min-width: 0; overflow: hidden; container-type: inline-size; }
 .canvas-pane + .canvas-pane { border-left: 1px solid var(--line); }
 .plan-svg { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; }
 .plan-svg.tool-select { cursor: default; }
@@ -158,7 +158,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 
 .floating { position: absolute; z-index: 10; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow); }
 .toolbar { bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; padding: 5px; }
-.toolbar button { height: 36px; min-width: 36px; padding: 0 9px; border: 0; border-radius: var(--r); background: transparent; color: var(--ink-2); display: inline-flex; align-items: center; gap: 6px; font-weight: 500; position: relative; }
+.toolbar button { white-space: nowrap; height: 36px; min-width: 36px; padding: 0 9px; border: 0; border-radius: var(--r); background: transparent; color: var(--ink-2); display: inline-flex; align-items: center; gap: 6px; font-weight: 500; position: relative; }
 .toolbar button:hover { background: var(--surface-hover); color: var(--ink); }
 .toolbar button[aria-pressed='true'] { background: var(--ink); color: var(--surface); }
 .toolbar .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
@@ -174,10 +174,12 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .ctxbar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
 
 .view-switch { top: 12px; right: 12px; padding: 3px; }
-.statusbar { top: 12px; left: 12px; display: flex; align-items: center; gap: 10px; padding: 0 10px; height: 34px; font-size: 11.5px; color: var(--ink-3); }
+.statusbar { bottom: 16px; left: 14px; display: flex; align-items: center; gap: 10px; padding: 0 10px; height: 34px; font-size: 11.5px; color: var(--ink-3); }
 .statusbar button { border: 0; background: transparent; color: var(--ink-3); display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 3px 5px; border-radius: 5px; }
 .statusbar button:hover { color: var(--ink); background: var(--surface-hover); }
 .statusbar button[aria-pressed='true'] { color: var(--accent); }
+/* Cursor read-out yields to the toolbar when the canvas is narrow. */
+@container (max-width: 960px) { .statusbar { display: none; } }
 .zoom-ctrl { bottom: 16px; right: 14px; display: flex; align-items: center; padding: 3px; }
 .zoom-ctrl button { width: 28px; height: 28px; border: 0; background: transparent; border-radius: 6px; color: var(--ink-2); display: grid; place-items: center; }
 .zoom-ctrl button:hover { background: var(--surface-hover); }
@@ -185,6 +187,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .dim-input { position: absolute; z-index: 12; transform: translate(-50%, -50%); }
 .dim-input input { width: 92px; height: 26px; text-align: center; border-radius: 6px; border: 1px solid var(--accent); box-shadow: var(--ring); background: var(--surface); font-variant-numeric: tabular-nums; font-weight: 600; font-size: 12px; outline: none; }
 .hint { position: absolute; z-index: 11; top: 60px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--surface); padding: 6px 12px; border-radius: 99px; font-size: 12px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 8px; white-space: nowrap; animation: pop var(--t) var(--ease); }
+@container (max-width: 760px) { .hint { white-space: normal; flex-wrap: wrap; justify-content: center; text-align: center; width: max-content; max-width: calc(100cqw - 24px); border-radius: 14px; } }
 .hint .kbd { background: transparent; color: inherit; border-color: rgba(255,255,255,0.25); }
 
 /* --------------------------------------------------------------- inspector */

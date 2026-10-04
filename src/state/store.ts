@@ -25,7 +25,8 @@ import { seedProjects } from './seed';
 export type Space = 'design' | 'site' | 'docs' | 'cost' | 'analysis' | 'collab' | 'versions' | 'library' | 'settings';
 export type HomeSection = 'home' | 'projects' | 'shared' | 'templates' | 'library' | 'admin';
 export type Route = { name: 'home'; section: HomeSection } | { name: 'project'; id: Id; space: Space };
-export type Tool = 'select' | 'wall' | 'room' | 'door' | 'window' | 'stair' | 'column' | 'comment' | 'place' | 'pan';
+export type Tool = 'select' | 'wall' | 'room' | 'door' | 'window' | 'stair' | 'column' | 'comment' | 'place' | 'pan' | 'block';
+export interface PlaceBlock { blockId: string; size: string; rotation: number }
 export type ViewMode = 'plan' | '3d' | 'split';
 
 interface HistoryEntry { patches: Patch[]; inverse: Patch[]; label: string }
@@ -67,6 +68,11 @@ interface State {
   peers: Record<string, { projectId: string; label: string; at: number }>;
   apiKey: string;
   shortcuts: Record<string, string>;
+  /** Ready-made block being placed (click-to-place or drag-and-drop). */
+  placeBlock: PlaceBlock | null;
+  /** Simple mode hides drafting tools and technical properties for non-architects. */
+  simpleMode: boolean;
+  leftTab: 'add' | 'levels' | 'layers';
 }
 
 interface Actions {
@@ -95,6 +101,8 @@ interface Actions {
   focusOn(point: { x: number; y: number }, levelId?: Id): void;
   setApiKey(k: string): Promise<void>;
   setTheme(t: 'light' | 'dark'): void;
+  startBlock(blockId: string, size: string): void;
+  setSimpleMode(v: boolean): void;
   saveNow(): Promise<void>;
 }
 
@@ -143,6 +151,9 @@ export const useStore = create<Store>((setState, getState) => ({
   peers: {},
   apiKey: '',
   shortcuts: defaultShortcuts,
+  placeBlock: null,
+  simpleMode: true,
+  leftTab: 'add',
 
   async init() {
     let index = await localAdapter.loadIndex().catch(() => [] as ProjectIndexEntry[]);
@@ -158,6 +169,8 @@ export const useStore = create<Store>((setState, getState) => ({
     const theme = (await getSetting<'light' | 'dark'>('theme')) ?? (matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     const apiKey = (await getSetting<string>('anthropicKey')) ?? '';
     const shortcuts = { ...defaultShortcuts, ...((await getSetting<Record<string, string>>('shortcuts')) ?? {}) };
+    const simpleMode = (await getSetting<boolean>('simpleMode')) ?? true;
+    setState({ simpleMode });
     document.documentElement.dataset.theme = theme;
     setState({ index, ready: true, theme, apiKey, shortcuts });
     const route = parseHash();
@@ -295,7 +308,9 @@ export const useStore = create<Store>((setState, getState) => ({
     setState({ selection: sel });
   },
   setHover(ref) { if (getState().hover?.id !== ref?.id) setState({ hover: ref }); },
-  setTool(t, asset) { setState({ tool: t, placeAsset: asset ?? (t === 'place' ? getState().placeAsset : null), ...(t !== 'select' ? { selection: [] } : {}) }); },
+  setTool(t, asset) { setState({ tool: t, placeAsset: asset ?? (t === 'place' ? getState().placeAsset : null), ...(t !== 'block' ? { placeBlock: null } : {}), ...(t !== 'select' ? { selection: [] } : {}) }); },
+  startBlock(blockId, size) { setState({ tool: 'block', placeBlock: { blockId, size, rotation: getState().placeBlock?.blockId === blockId ? getState().placeBlock!.rotation : 0 }, selection: [], view: getState().view === '3d' ? 'plan' : getState().view }); },
+  setSimpleMode(v) { void setSetting('simpleMode', v); setState({ simpleMode: v }); },
   setLevel(id) { setState({ levelId: id, selection: [] }); },
   setView(v) { setState({ view: v }); },
   set(k, v) { setState({ [k]: v } as Partial<State>); },

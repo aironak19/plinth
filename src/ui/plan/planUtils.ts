@@ -126,15 +126,25 @@ export function dimensionChains(dl: DerivedLevel): { a: Vec2; b: Vec2; offset: V
   out.push({ a: { x: minX, y: minY }, b: { x: maxX, y: minY }, offset: { x: 0, y: -1700 }, overall: true });
   out.push({ a: { x: minX, y: minY }, b: { x: minX, y: maxY }, offset: { x: -1700, y: 0 }, overall: true });
   // chain: wall centre-lines meeting the bottom/left exterior faces
-  const bottomXs = new Set<number>([minX, maxX]);
-  const leftYs = new Set<number>([minY, maxY]);
+  // Room-by-room chains on all four sides: wall centre-lines meeting each exterior face.
+  const bottomXs = new Set<number>([minX, maxX]), topXs = new Set<number>([minX, maxX]);
+  const leftYs = new Set<number>([minY, maxY]), rightYs = new Set<number>([minY, maxY]);
   for (const w of dl.walls) {
+    if (w.kind === 'parapet') continue;
     const vertical = Math.abs(w.a.x - w.b.x) < 5, horizontal = Math.abs(w.a.y - w.b.y) < 5;
     if (vertical && Math.min(w.a.y, w.b.y) - minY < 400) bottomXs.add(Math.round(w.a.x));
+    if (vertical && maxY - Math.max(w.a.y, w.b.y) < 400) topXs.add(Math.round(w.a.x));
     if (horizontal && Math.min(w.a.x, w.b.x) - minX < 400) leftYs.add(Math.round(w.a.y));
+    if (horizontal && maxX - Math.max(w.a.x, w.b.x) < 400) rightYs.add(Math.round(w.a.y));
   }
-  const bx = [...bottomXs].sort((a, b) => a - b), ly = [...leftYs].sort((a, b) => a - b);
-  for (let i = 0; i + 1 < bx.length; i++) if (bx[i + 1] - bx[i] > 300) out.push({ a: { x: bx[i], y: minY }, b: { x: bx[i + 1], y: minY }, offset: { x: 0, y: -900 } });
-  for (let i = 0; i + 1 < ly.length; i++) if (ly[i + 1] - ly[i] > 300) out.push({ a: { x: minX, y: ly[i] }, b: { x: minX, y: ly[i + 1] }, offset: { x: -900, y: 0 } });
+  const chain = (vals: Set<number>, seg: (a: number, b: number) => { a: Vec2; b: Vec2; offset: Vec2 }) => {
+    const v = [...vals].sort((a, b) => a - b);
+    if (v.length < 3) return; // a single span repeats the overall dimension
+    for (let i = 0; i + 1 < v.length; i++) if (v[i + 1] - v[i] > 300) out.push(seg(v[i], v[i + 1]));
+  };
+  chain(bottomXs, (a, b) => ({ a: { x: a, y: minY }, b: { x: b, y: minY }, offset: { x: 0, y: -900 } }));
+  chain(topXs, (a, b) => ({ a: { x: a, y: maxY }, b: { x: b, y: maxY }, offset: { x: 0, y: 900 } }));
+  chain(leftYs, (a, b) => ({ a: { x: minX, y: a }, b: { x: minX, y: b }, offset: { x: -900, y: 0 } }));
+  chain(rightYs, (a, b) => ({ a: { x: maxX, y: a }, b: { x: maxX, y: b }, offset: { x: 900, y: 0 } }));
   return out;
 }
