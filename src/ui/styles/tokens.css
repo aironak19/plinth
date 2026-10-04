@@ -1,0 +1,93 @@
+/*
+ * Plinth design tokens.
+ * A calm, architectural neutral palette — warm paper greys, ink text and a single
+ * restrained accent. Semantic colours are reserved for meaning (health, approvals).
+ */
+:root {
+  --font: 'Inter Variable', Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+
+  --bg: #f4f3f0;
+  --bg-sunken: #eceae6;
+  --surface: #ffffff;
+  --surface-2: #faf9f7;
+  --surface-hover: #f3f2ef;
+  --surface-active: #ebe9e5;
+  --paper: #fcfbf8;
+  --line: rgba(28, 27, 25, 0.09);
+  --line-strong: rgba(28, 27, 25, 0.16);
+  --ink: #1c1b19;
+  --ink-2: #4a4843;
+  --ink-3: #7b7871;
+  --ink-4: #a9a59d;
+  --accent: #3358d4;
+  --accent-hover: #2b4cbd;
+  --accent-soft: rgba(51, 88, 212, 0.1);
+  --accent-softer: rgba(51, 88, 212, 0.06);
+  --accent-ink: #ffffff;
+  --ok: #2f8a5b;
+  --ok-soft: rgba(47, 138, 91, 0.12);
+  --warn: #b7791f;
+  --warn-soft: rgba(183, 121, 31, 0.13);
+  --err: #c2413a;
+  --err-soft: rgba(194, 65, 58, 0.11);
+  --info: #5b6f9e;
+
+  --poche: #1c1b19;
+  --plan-line: #2d2b28;
+  --plan-light: #9a968e;
+  --plan-grid: rgba(28, 27, 25, 0.045);
+  --plan-grid-major: rgba(28, 27, 25, 0.085);
+
+  --r-sm: 6px;
+  --r: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --shadow-sm: 0 1px 2px rgba(28, 27, 25, 0.06);
+  --shadow: 0 1px 2px rgba(28, 27, 25, 0.05), 0 4px 12px rgba(28, 27, 25, 0.06);
+  --shadow-lg: 0 2px 6px rgba(28, 27, 25, 0.06), 0 16px 40px rgba(28, 27, 25, 0.12);
+  --ring: 0 0 0 3px rgba(51, 88, 212, 0.25);
+
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --t-fast: 120ms;
+  --t: 180ms;
+
+  --topbar: 52px;
+  --rail: 56px;
+  --panel: 284px;
+  --inspector: 300px;
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg: #121212;
+  --bg-sunken: #0d0d0d;
+  --surface: #1b1b1b;
+  --surface-2: #202020;
+  --surface-hover: #262626;
+  --surface-active: #2e2e2e;
+  --paper: #161616;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.15);
+  --ink: #ecebe8;
+  --ink-2: #c3c1bc;
+  --ink-3: #8d8a84;
+  --ink-4: #615f5a;
+  --accent: #6d8cf0;
+  --accent-hover: #86a0f4;
+  --accent-soft: rgba(109, 140, 240, 0.16);
+  --accent-softer: rgba(109, 140, 240, 0.09);
+  --poche: #e8e6e1;
+  --plan-line: #dcd9d3;
+  --plan-light: #77746e;
+  --plan-grid: rgba(255, 255, 255, 0.035);
+  --plan-grid-major: rgba(255, 255, 255, 0.07);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.4), 0 16px 40px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --t-fast: 0ms; --t: 0ms; }
+}

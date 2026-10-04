@@ -1,0 +1,105 @@
+# Plinth — the intelligent architectural studio
+
+**One building model. Every view, drawing, quantity and decision derived from it.**
+
+Plinth is a browser-based architectural design, BIM and documentation platform for residential work: villas, houses, duplexes, farmhouses and bungalows. Change a bedroom from 12 ft to 14 ft and the walls, neighbouring rooms, doors, windows, areas, 3D model, elevations, sections, schedules, quantities, cost, design health and drawing sheets all update. Nobody re-enters the same information twice.
+
+**Live demo:** https://aironak19.github.io/plinth/ — it runs entirely in your browser, and projects are saved on your device.
+
+---
+
+## What's inside
+
+| Area | What works today |
+|---|---|
+| **Single building model** | A canonical, typed project model: site, levels, walls, doors, windows, rooms, stairs, roofs, columns, beams, furniture, design options, scenes, collaboration. Plans, 3D, drawings, schedules, quantities and cost are all *derived*; nothing is stored twice. |
+| **Command-first operations** | Every change is a typed, permission-checked operation (`room.resize`, `wall.create`, `style.apply` …) with undo/redo patches and an audit trail. Mouse, keyboard, ⌘K palette, Architect AI and the Model API all use the same operations. |
+| **2D plan editor** | Walls with endpoint, midpoint, alignment, perpendicular, grid and ortho snapping. Type exact lengths while drawing (`12'6"`, `3.8m`). Rooms detected automatically from walls (planar-graph faces). Mitred wall joins and clean poché. Parametric doors and windows that cut their own openings. Drag room edges to resize with live propagation. Inline dimension editing, marquee selection, a contextual toolbar, comment pins and design-health markers. |
+| **3D** | Real-time three.js viewport built from the same solids as the drawings. Procedural PBR materials, a real sun position for the project location and date, shadows, and seven render styles (realistic, architectural, clay, sketch, x-ray, wireframe, draft). Also: cutaway sections, walk mode, saved scenes, high-resolution renders, glTF/OBJ export. |
+| **Site & zoning** | Any plot polygon (L-shaped, irregular), per-edge setbacks and road frontage, buildable zone, coverage / FAR / height / floors / parking meters, violation zones, and "Fix automatically" with an impact preview. |
+| **Rule framework** | Regional rule packs (India NBC-based, US IRC, UAE villa) with per-project overrides. Nothing regulatory is hard-coded in the engine. |
+| **Roofs & stairs** | Flat (with parapet), gable, hip, shed, butterfly and mansard roofs. L/T outlines are decomposed into intersecting volumes, and ridges, hips, valleys, gutters and downpipes are computed. Straight, L, U and spiral stairs with riser/tread calculation and safety checks. |
+| **Documentation** | An automatic, always-current sheet set (A0–A4): cover and sheet index, site plan, floor plans, elevations, sections, roof plan, door/window/room schedules, area statement and takeoff. Title blocks and scale bars. Vector PDF export. |
+| **Interoperability** | IFC4 export (walls, slabs, spaces, doors/windows in real openings, psets). DXF R12 export, plus DXF import that converts line pairs into walls. glTF/OBJ, SVG, CSV BOQ, and a Plinth JSON project file. |
+| **Quantities & cost** | Takeoff measured net of openings, configurable rates and currency, margin / contingency / tax, cost by category and level, a design-option comparison, and material alternatives ("Italian → Indian marble saves ₹X") with previews. |
+| **Design health** | A continuously running validation engine: geometry, rooms vs. minimum standards, openings, stairs, setbacks/FAR/coverage, daylight, accessibility, circulation (walking distance and reachability), structural coordination and documentation. Each issue jumps to the element; fixes are previewed before you apply them. |
+| **Analysis** | Sun study with a sun-path diagram, daylight by room, and climate notes (overhangs, west sun, cross-ventilation). Generative design scores nine complete schemes in a Web Worker against your priorities. |
+| **Architect AI** | Natural-language design that edits the structured model: *"make the master bedroom larger"*, *"add a powder room near the living room"*, *"show rooms smaller than 100 sq ft"*, *"create a 4 bedroom villa on a 40 × 60 ft plot…"*. Every change is a proposal with a measured impact (areas, cost, health) and **Preview / Apply / Cancel**; nothing changes silently. It works offline with an on-device engine; add a Claude API key to use Claude (`claude-opus-5-5`) with the same operation tools. |
+| **Collaboration** | Activity feed, comments pinned to rooms and locations with @mentions, lightweight tasks, an approval workflow (Draft → Internal review → Client review → Approved → Construction), notifications grouped per project, and live sync between open windows. |
+| **Versions & options** | Git-like versions with change summaries, compare (plan and metric diff), restore and branch-to-option. Design options share the site and brief. |
+| **Presentation** | Full-screen client mode: 3D overview, saved scenes, plans, a materials board, option comparison, and approve / request changes. |
+| **Enterprise** | Roles and permissions enforced by the dispatcher (with "view as client / contractor"), an audit log, plan tiers as configuration, storage, a Model API explorer and console, and extensions (rule packs, libraries, exporters). |
+
+### The flagship sample: Aura Villa
+
+The first project you see is drawn on a real plot from a client's hand sketch: an L-shaped site of **52 × 49 ft stepping to 42 × 47 ft** (96 ft deep, about 4,522 sq ft). It is a G+1, five-bedroom villa (four upstairs plus a guest suite) with a pool, at 33.5% coverage and FAR 0.67, with every setback checked.
+
+---
+
+## Architecture
+
+```
+            Mouse · Keyboard · ⌘K · Architect AI · Model API
+                              │  OpCall { type, params }
+                              ▼
+                 ┌─────────────────────────┐
+                 │  Operation registry      │  typed · permission-checked · undoable · audited
+                 └────────────┬────────────┘
+                              ▼
+                 ┌─────────────────────────┐
+                 │  Canonical project model │  immutable (immer), structural sharing
+                 └────────────┬────────────┘
+         ┌──────────┬─────────┼──────────┬───────────┬────────────┐
+         ▼          ▼         ▼          ▼           ▼            ▼
+   Rooms (planar  Solids   Site &     Quantities  Validation   Analysis
+   graph faces)   (faces)  zoning     & cost      (health)     (sun, daylight)
+         │          │
+         ▼          ▼
+   2D plan     3D · elevations · sections · IFC · glTF
+```
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data model, derivation pipeline and extension points.
+
+```
+src/
+  core/            ← pure TypeScript, no UI; fully unit-tested
+    model/         types, factories, queries, org/RBAC
+    geometry/      vectors, polygons & booleans, planar graph face detection
+    derive/        rooms, wall joins, solids, site, stairs, roof, quantities, cost, validation, sun, analysis
+    ops/           operation registry + model/project/collaboration operations
+    generate/      layout generator, scoring, the Aura Villa sample
+    ai/            on-device intent engine, impact preview, Claude provider
+    docs/          plan symbols, drawings, schedules, sheets
+    io/            PDF, DXF (import/export), IFC4
+    catalog/       materials, assets, styles
+    rules/         regional rule sets
+  state/           store (undo/redo, autosave, versions, sync), persistence, derived hooks
+  ui/              shell, dashboard, wizard, plan editor, 3D, inspector, spaces, AI panel, presentation
+  workers/         generative design worker
+tests/             model, geometry, units, generator, AI and documentation tests
+```
+
+## Run it locally
+
+```bash
+npm install
+npm run dev        # http://localhost:5173
+npm test           # unit, geometry, propagation, AI and docs tests
+npm run build      # type-check + production build
+```
+
+## Keyboard
+
+`W` wall · `R` room · `D` door · `N` window · `S` stair · `O` column · `K` comment · `V` select · `C` copy · `A` align · `P` plan · `3` 3D · `2` split · `E` elevations · `⌘K` command palette · `⌘J` Architect AI · `⌘Z` / `⇧⌘Z` undo/redo · `⌘S` create version · `?` all shortcuts
+
+## Honest boundaries
+
+- **Storage is local-first** (IndexedDB) behind a `SyncAdapter` interface. Cloud sync, SSO/MFA and multi-user real-time editing need a Plinth Cloud backend, which isn't part of this repository. Sync between windows on the same device works today.
+- **Structure and energy are conceptual.** Columns, beams and climate notes are planning aids, not engineering-certified analysis.
+- **Rule sets are starting points** based on published codes. Verify against the local authority before submitting for permits.
+- **Cost rates are indicative** (2026 Indian metro). Every estimate shows its source, and every rate can be overridden per project.
+- **AI rendering, VR/AR and the extension marketplace** are designed for but not shipped. See the roadmap in `docs/ARCHITECTURE.md`.
+
+---
+
+Built with React, TypeScript, three.js, immer, polygon-clipping, jsPDF and svg2pdf.js.
