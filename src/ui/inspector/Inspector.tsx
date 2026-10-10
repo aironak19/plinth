@@ -4,12 +4,14 @@
  * Every field commits a typed operation, so edits are undoable and audited.
  */
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, BrickWall, Square, DoorOpen, AppWindow, Footprints, Sofa, Columns3, Triangle, LandPlot, Info } from 'lucide-react';
+import { ChevronDown, ChevronRight, BrickWall, Square, DoorOpen, AppWindow, Footprints, Sofa, Columns3, Triangle, LandPlot, Info, Trees } from 'lucide-react';
 import { useStore } from '../../state/store';
 import { useBuilding, useCost, useDoc, useHealth, useRules, useSite, useUnits, useLevels } from '../../state/derived';
 import { LengthInput, NumberInput, Prop, TextInput, swatchStyle, Popover, HealthRing, relTime } from '../components';
 import { MATERIALS, getMaterial, type Material } from '../../core/catalog/materials';
 import { ASSET_BY_ID } from '../../core/catalog/assets';
+import { PLANTS, PLANT_BY_ID, PLANT_TYPES, SUN_LABEL, WATER_LABEL, weeklyWater } from '../../core/catalog/plants';
+import { linearSpec } from '../../core/derive/solids';
 import { deriveLevel } from '../../core/derive/level';
 import { computeStair } from '../../core/derive/stairs';
 import { computeRoof } from '../../core/derive/roof';
@@ -270,6 +272,30 @@ function ElementInspector({ refx }: { refx: ElementRef }) {
     const a = ASSET_BY_ID[f.assetId];
     const patch = (p: Record<string, unknown>) => act([{ type: 'furniture.update', params: { id: f.id, patch: p } }]);
     const size = f.size ?? a.size;
+    if (a.plant) {
+      const pl = a.plant;
+      const grown = Math.round((size.h / pl.height) * 100);
+      return (
+        <>
+          <Head icon={<Trees size={12} />} kind={PLANT_TYPES.find((t) => t.id === pl.type)?.label ?? 'Plant'} title={pl.common} sub={pl.botanical} />
+          <div className="panel-body">
+            <div className="props">
+              <Prop label="Height now"><LengthInput value={size.h} units={units} onCommit={(mm) => { const k = mm / pl.height; patch({ size: { w: pl.spread * k, d: pl.spread * k, h: mm } }); }} /></Prop>
+              <Prop label="Spread now"><LengthInput value={size.w} units={units} onCommit={(mm) => patch({ size: { ...size, w: mm, d: mm } })} /></Prop>
+              <Prop label="Mature size"><span className="small num">{formatLength(pl.height, units, { compact: true })} tall · {formatLength(pl.spread, units, { compact: true })} wide{grown < 96 ? ` (${grown}% grown)` : ''}</span></Prop>
+              <Prop label="Light"><span className="small">{SUN_LABEL[pl.sun]}</span></Prop>
+              <Prop label="Water"><span className="small">{WATER_LABEL[pl.water]} · about {weeklyWater(pl)} L a week</span></Prop>
+              <Prop label="Foliage"><span className="small">{pl.evergreen ? 'Evergreen' : 'Deciduous — bare in winter'}</span></Prop>
+              {pl.flower && <Prop label="Flowers"><span className="small row" style={{ gap: 6 }}><span style={{ width: 10, height: 10, borderRadius: 5, background: pl.flower.color, border: '1px solid rgba(0,0,0,0.15)' }} />{pl.flower.season}</span></Prop>}
+              <Prop label="Plant apart"><span className="small num">{formatLength(pl.spacing, units, { compact: true })} centre to centre</span></Prop>
+              <Prop label="Budget"><span className="small num">₹{pl.price.toLocaleString('en-IN')} supplied and planted</span></Prop>
+            </div>
+            <div className="small" style={{ marginTop: 12, padding: '9px 11px', background: 'var(--bg-sunken)', borderRadius: 8, lineHeight: 1.45 }}>{pl.note}</div>
+            <div className="tiny muted" style={{ marginTop: 10 }}>Use <b>Look → Planting age</b> in 3D to see the garden at year 1, year 5 or mature.</div>
+          </div>
+        </>
+      );
+    }
     return (
       <>
         <Head icon={<Sofa size={12} />} kind={a.category} title={a.name} sub={`${a.manufacturer} · ${a.sku}`} />
@@ -313,17 +339,43 @@ function ElementInspector({ refx }: { refx: ElementRef }) {
 
   if (refx.kind === 'siteFeature' && doc.site.features[refx.id]) {
     const f = doc.site.features[refx.id];
+    const upd = (patch: Record<string, unknown>) => act([{ type: 'site.feature.update', params: { id: f.id, patch } }]);
+    const prop = (k: string, v: string | number | boolean) => upd({ props: { ...f.props, [k]: v } });
+    const linear = !!f.path && f.path.length > 1;
+    const spec = linear ? linearSpec(f) : null;
+    const length = linear ? f.path!.reduce((t, q, i) => (i ? t + Math.hypot(q.x - f.path![i - 1].x, q.y - f.path![i - 1].y) : 0), 0) : 0;
+    const area = f.polygon ? Math.abs(f.polygon.reduce((s2, q, i) => s2 + q.x * f.polygon![(i + 1) % f.polygon!.length].y - f.polygon![(i + 1) % f.polygon!.length].x * q.y, 0) / 2) : 0;
+    const water = f.kind === 'pool' || f.kind === 'pond';
+    const species = PLANT_BY_ID[String(f.props.species ?? 'murraya')] ?? PLANT_BY_ID.murraya;
     return (
       <>
-        <Head icon={<LandPlot size={12} />} kind="Site feature" title={f.name} sub={f.kind} />
-        <div className="panel-body"><div className="props"><Prop label="Name"><TextInput value={f.name} onCommit={(v) => act([{ type: 'site.feature.update', params: { id: f.id, patch: { name: v } } }])} /></Prop>
-          {f.polygon && <Prop label="Area"><span className="num small">{formatArea(Math.abs(f.polygon.reduce((s, p, i) => s + p.x * f.polygon![(i + 1) % f.polygon!.length].y - f.polygon![(i + 1) % f.polygon!.length].x * p.y, 0) / 2), units)}</span></Prop>}
-          <Prop label="Material"><MaterialPicker value={f.materialId ?? 'paver'} slot="site" onPick={(id) => act([{ type: 'site.feature.update', params: { id: f.id, patch: { materialId: id } } }])} /></Prop></div></div>
+        <Head icon={<LandPlot size={12} />} kind={KIND_LABEL[f.kind] ?? 'Site feature'} title={f.name} sub={linear ? `${formatLength(length, units)} long` : f.polygon ? formatArea(area, units) : f.kind} />
+        <div className="panel-body"><div className="props">
+          <Prop label="Name"><TextInput value={f.name} onCommit={(v) => upd({ name: v })} /></Prop>
+          {f.polygon && <Prop label="Area"><span className="num small">{formatArea(area, units)}</span></Prop>}
+          {linear && spec && (
+            <>
+              <Prop label="Length"><span className="num small">{formatLength(length, units)}</span></Prop>
+              <Prop label="Height"><LengthInput value={spec.height} units={units} onCommit={(mm) => prop('height', Math.max(200, Math.min(4000, mm)))} /></Prop>
+              <Prop label="Thickness"><LengthInput value={spec.width} units={units} onCommit={(mm) => prop('width', Math.max(40, Math.min(2000, mm)))} /></Prop>
+            </>
+          )}
+          {f.kind === 'hedge' ? (
+            <Prop label="Hedge plant"><select className="select" value={species.id} onChange={(e) => prop('species', e.target.value)}>{PLANTS.filter((pl) => pl.type === 'shrub' || pl.id === 'ficus' || pl.id === 'bamboo' || pl.id === 'ashoka').map((pl) => <option key={pl.id} value={pl.id}>{pl.common}</option>)}</select></Prop>
+          ) : !water && <Prop label="Material"><MaterialPicker value={f.materialId ?? spec?.material ?? 'paver'} slot={linear ? 'exterior' : 'site'} onPick={(id) => upd({ materialId: id })} /></Prop>}
+          {water && <Prop label="Edge paving"><MaterialPicker value={String(f.props.coping ?? (f.kind === 'pond' ? 'crazy-paving' : 'travertine'))} slot="site" onPick={(id) => prop('coping', id)} /></Prop>}
+          {f.kind === 'parking' && <Prop label="Car spaces"><NumberInput value={Number(f.props.spaces ?? 1)} onCommit={(v) => prop('spaces', Math.max(0, Math.round(v)))} /></Prop>}
+        </div>
+        {f.kind === 'hedge' && <div className="small muted" style={{ marginTop: 12 }}>{species.common} at {formatLength(species.spacing, units, { compact: true })} centres — about {Math.ceil(length / species.spacing)} plants. <i>{species.botanical}</i>.</div>}
+        {f.props.auto && <div className="tiny muted" style={{ marginTop: 12 }}>Laid by <b>Design my garden</b>. Edit it freely; redesigning the garden replaces generated items only.</div>}
+        </div>
       </>
     );
   }
   return <ProjectSummary />;
 }
+
+const KIND_LABEL: Record<string, string> = { pool: 'Swimming pool', pond: 'Pond', lawn: 'Lawn', bed: 'Planting bed', gravel: 'Gravel', patio: 'Patio', deck: 'Deck', driveway: 'Driveway', parking: 'Parking', pathway: 'Path', hedge: 'Hedge', fence: 'Fence', wall: 'Garden wall' };
 
 function BimNote({ structural }: { structural?: boolean }) {
   return (

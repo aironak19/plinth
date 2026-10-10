@@ -4,11 +4,15 @@
  * plan and model can never disagree.
  */
 
-export type AssetCategory = 'living' | 'bedroom' | 'dining' | 'kitchen' | 'bathroom' | 'lighting' | 'exterior' | 'study' | 'utility' | 'pooja';
-export type PartSlot = 'body' | 'accent' | 'fabric' | 'wood' | 'metal' | 'glass' | 'white' | 'leaf' | 'trunk' | 'dark' | 'light' | 'stone' | 'water';
+import { OUTDOOR_ASSETS, PLANT_ASSETS } from './outdoorAssets';
+import type { Plant } from './plants';
+
+export type AssetCategory = 'living' | 'bedroom' | 'dining' | 'kitchen' | 'bathroom' | 'lighting' | 'exterior' | 'study' | 'utility' | 'pooja' | 'outdoor' | 'garden' | 'plant';
+export type PartSlot = 'body' | 'accent' | 'fabric' | 'wood' | 'metal' | 'glass' | 'white' | 'leaf' | 'trunk' | 'dark' | 'light' | 'stone' | 'water' | 'roof' | 'soil' | 'sand';
 
 export interface Part {
-  shape: 'box' | 'cyl' | 'sphere' | 'cone';
+  /** `sphere` is an ellipsoid (w × d × h); `pyramid` is a four-sided roof over a w × d base. */
+  shape: 'box' | 'cyl' | 'sphere' | 'cone' | 'pyramid';
   /** Centre of the part's base, in mm, relative to the asset centre on the floor. x → width, y → depth (front is −y). */
   x: number; y: number; z: number;
   w: number; d: number; h: number;
@@ -34,6 +38,8 @@ export interface Asset {
   price: number;
   /** Plan symbol extras (text / glyphs) drawn on top of the projection. */
   glyph?: 'pillows' | 'basin' | 'hob' | 'sink' | 'wc' | 'car' | 'tree' | 'shower' | 'light' | 'tv' | 'bath';
+  /** Set for plants: the horticultural record that drives the symbol, the 3D model and the planting schedule. */
+  plant?: Plant;
 }
 
 const box = (x: number, y: number, z: number, w: number, d: number, h: number, slot: PartSlot, overhead = false): Part => ({ shape: 'box', x, y, z, w, d, h, slot, overhead });
@@ -159,7 +165,7 @@ export const ASSETS: Asset[] = [
     parts: [box(0, 150, 600, 3000, 40, 1700, 'white'), box(-1350, 0, 0, 300, 400, 1100, 'dark'), box(1350, 0, 0, 300, 400, 1100, 'dark'), box(0, 0, 0, 1600, 400, 450, 'dark')] }),
   A({ id: 'swing', name: 'Swing (jhoola)', category: 'living', size: { w: 1500, d: 800, h: 2200 }, tags: ['swing', 'jhoola', 'balcony', 'outdoor'], price: 35000,
     parts: [box(0, 0, 400, 1400, 700, 80, 'wood'), box(0, 300, 480, 1400, 60, 450, 'wood'), box(-680, 0, 480, 30, 30, 1720, 'metal'), box(680, 0, 480, 30, 30, 1720, 'metal')] }),
-  A({ id: 'planter-box', name: 'Planter box', category: 'exterior', size: { w: 1200, d: 400, h: 900 }, tags: ['plant', 'planter', 'balcony', 'garden'], price: 9000, glyph: 'tree',
+  A({ id: 'planter-box', name: 'Planter box', category: 'garden', size: { w: 1200, d: 400, h: 900 }, tags: ['plant', 'planter', 'balcony', 'garden'], price: 9000, glyph: 'tree',
     variants: [{ id: 'green', name: 'Green', colors: { leaf: '#6f8f4e' } }],
     parts: [box(0, 0, 0, 1200, 400, 450, 'stone'), sph(-300, 0, 400, 260, 'leaf'), sph(300, 0, 420, 280, 'leaf')] }),
   A({ id: 'yoga-mat', name: 'Yoga mats & bolsters', category: 'study', size: { w: 1900, d: 1400, h: 120 }, tags: ['yoga', 'meditation', 'wellness'], price: 8000,
@@ -176,19 +182,12 @@ export const ASSETS: Asset[] = [
   A({ id: 'scooter', name: 'Scooter / motorbike', category: 'exterior', size: { w: 700, d: 1900, h: 1150 }, tags: ['two wheeler', 'bike', 'scooter', 'parking'], price: 0,
     variants: [{ id: 'red', name: 'Red', colors: { body: '#a8322d' } }, { id: 'black', name: 'Black', colors: { body: '#2a2b2d' } }],
     parts: [box(0, 0, 250, 450, 1500, 450, 'body'), box(0, 450, 650, 700, 120, 500, 'dark'), cyl(0, -700, 0, 280, 120, 'dark'), cyl(0, 700, 0, 280, 120, 'dark')] }),
-  A({ id: 'tree', name: 'Shade tree', category: 'exterior', size: { w: 4500, d: 4500, h: 7000 }, tags: ['tree', 'landscape', 'neem', 'mango'], price: 12000, glyph: 'tree',
-    variants: [{ id: 'green', name: 'Summer', colors: { leaf: '#6f8f4e' } }, { id: 'flower', name: 'Flowering', colors: { leaf: '#b5728a' } }],
-    parts: [cyl(0, 0, 0, 180, 3200, 'trunk'), sph(0, 0, 2800, 2250, 'leaf', true)] }),
-  A({ id: 'palm', name: 'Palm tree', category: 'exterior', size: { w: 3000, d: 3000, h: 7500 }, tags: ['tree', 'palm', 'tropical'], price: 15000, glyph: 'tree',
-    variants: [{ id: 'green', name: 'Green', colors: { leaf: '#5f8a45' } }],
-    parts: [cyl(0, 0, 0, 160, 6500, 'trunk'), sph(0, 0, 6000, 1500, 'leaf', true)] }),
-  A({ id: 'shrub', name: 'Shrub', category: 'exterior', size: { w: 1200, d: 1200, h: 1000 }, tags: ['plant', 'shrub', 'landscape'], price: 2500, glyph: 'tree',
-    variants: [{ id: 'green', name: 'Green', colors: { leaf: '#77965a' } }],
-    parts: [sph(0, 0, 0, 600, 'leaf')] }),
-  A({ id: 'lounger', name: 'Sun lounger', category: 'exterior', size: { w: 700, d: 2000, h: 400 }, tags: ['pool', 'lounger', 'outdoor'], price: 26000,
+  A({ id: 'lounger', name: 'Sun lounger', category: 'outdoor', size: { w: 700, d: 2000, h: 400 }, tags: ['pool', 'lounger', 'outdoor'], price: 26000,
     parts: [box(0, 0, 0, 700, 2000, 300, 'wood'), box(0, 750, 300, 700, 500, 350, 'fabric')] }),
-  A({ id: 'outdoor-dining', name: 'Outdoor dining', category: 'exterior', size: { w: 2200, d: 1850, h: 870 }, tags: ['outdoor', 'dining'], price: 70000,
+  A({ id: 'outdoor-dining', name: 'Outdoor dining for 4', category: 'outdoor', size: { w: 2200, d: 1850, h: 870 }, tags: ['outdoor', 'dining'], price: 70000,
     parts: [box(0, 0, 720, 1600, 900, 40, 'wood'), box(0, 0, 0, 100, 100, 720, 'metal'), ...chairsAround(1600, 900, 4)] }),
+  ...OUTDOOR_ASSETS,
+  ...PLANT_ASSETS,
 ];
 
 export const ASSET_BY_ID: Record<string, Asset> = Object.fromEntries(ASSETS.map((a) => [a.id, a]));
@@ -196,15 +195,23 @@ export const ASSET_BY_ID: Record<string, Asset> = Object.fromEntries(ASSETS.map(
 export const ASSET_CATEGORIES: { id: AssetCategory; label: string }[] = [
   { id: 'living', label: 'Living' }, { id: 'bedroom', label: 'Bedroom' }, { id: 'dining', label: 'Dining' },
   { id: 'kitchen', label: 'Kitchen' }, { id: 'bathroom', label: 'Bathroom' }, { id: 'lighting', label: 'Lighting' },
-  { id: 'study', label: 'Study' }, { id: 'pooja', label: 'Pooja' }, { id: 'utility', label: 'Utility' }, { id: 'exterior', label: 'Exterior' },
+  { id: 'study', label: 'Study' }, { id: 'pooja', label: 'Pooja' }, { id: 'utility', label: 'Utility' },
+  { id: 'outdoor', label: 'Outdoor living' }, { id: 'garden', label: 'Garden & structures' }, { id: 'plant', label: 'Plants' }, { id: 'exterior', label: 'Vehicles' },
 ];
 
 export const DEFAULT_SLOT_COLORS: Record<PartSlot, string> = {
   body: '#c9c6bf', accent: '#a58f74', fabric: '#d8cfc0', wood: '#b98d5f', metal: '#8f9396', glass: '#a9c6d4',
-  white: '#f5f4f1', leaf: '#6f8f4e', trunk: '#6d5440', dark: '#2f2f30', light: '#f7f1e3', stone: '#d8d3cb', water: '#5fb4c9',
+  white: '#f5f4f1', leaf: '#6f8f4e', trunk: '#6d5440', dark: '#2f2f30', light: '#ffe2ad', stone: '#d8d3cb', water: '#5fb4c9',
+  roof: '#6b5546', soil: '#4f3f33', sand: '#e3d3a8',
 };
 
 export function assetColors(asset: Asset, variantId?: string): Record<PartSlot, string> {
   const v = asset.variants.find((x) => x.id === variantId) ?? asset.variants[0];
   return { ...DEFAULT_SLOT_COLORS, ...(v?.colors ?? {}) };
 }
+
+const OUTDOOR: AssetCategory[] = ['exterior', 'outdoor', 'garden', 'plant'];
+/** Anything that lives in the garden rather than inside a room. */
+export const isOutdoorAsset = (a: Asset | undefined): boolean => !!a && OUTDOOR.includes(a.category);
+/** Outdoor items that belong on the ground even when placed while an upper floor is active. */
+export const isGroundAsset = (a: Asset | undefined): boolean => !!a && (a.category === 'exterior' || a.category === 'garden' || (a.category === 'plant' && !a.plant?.potted));

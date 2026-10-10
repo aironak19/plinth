@@ -7,44 +7,84 @@ import { Search, GripVertical, MousePointerClick } from 'lucide-react';
 import { useStore } from '../../state/store';
 import { BLOCKS, BLOCK_CATEGORIES, searchBlocks, blockSize, type BlockCategory, type BlockDef } from '../../core/catalog/blocks';
 import { blockPreviewSvg } from './blockPreview';
+import { GardenDesigner, PlantBrowser, SurfaceBrowser, BoundaryBrowser, ObjectBrowser, OUTDOOR_TABS, SURFACES, BOUNDARIES, type OutdoorTab } from './LandscapeLibrary';
+import { searchPlants } from '../../core/catalog/plants';
+import { ASSETS } from '../../core/catalog/assets';
 import { formatArea, formatLength, ft } from '../../core/units';
 
 const EMPTY_IMG = typeof Image !== 'undefined' ? (() => { const i = new Image(); i.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'; return i; })() : null;
 
-export function BlockLibrary({ compact, initialCategory }: { compact?: boolean; initialCategory?: BlockCategory | 'all' }) {
+const INDOOR: BlockCategory[] = ['kits', 'bedrooms', 'bathrooms', 'kitchens', 'living', 'work', 'utility', 'circulation'];
+const OUTDOOR: BlockCategory[] = ['parking', 'outdoor', 'garden'];
+type Cat = BlockCategory | 'all' | OutdoorTab;
+
+export function BlockLibrary({ compact, initialCategory }: { compact?: boolean; initialCategory?: Cat }) {
   const [q, setQ] = useState('');
-  const [cat, setCat] = useState<BlockCategory | 'all'>(initialCategory ?? 'all');
+  const [cat, setCat] = useState<Cat>(initialCategory ?? 'all');
   useEffect(() => {
-    const h = (e: Event) => { setCat((e as CustomEvent).detail as BlockCategory); setQ(''); };
+    const h = (e: Event) => { setCat((e as CustomEvent).detail as Cat); setQ(''); };
     window.addEventListener('plinth:blockcat', h);
     return () => window.removeEventListener('plinth:blockcat', h);
   }, []);
-  const list = useMemo(() => (q ? searchBlocks(q) : BLOCKS.filter((b) => cat === 'all' || b.category === cat)), [q, cat]);
+  const isTab = OUTDOOR_TABS.some((t) => t.id === cat);
+  const list = useMemo(() => (q ? searchBlocks(q) : isTab ? [] : BLOCKS.filter((b) => cat === 'all' || b.category === cat)), [q, cat, isTab]);
   const grouped = useMemo(() => {
-    if (q || cat !== 'all') return [{ id: 'results', label: q ? `${list.length} matches` : BLOCK_CATEGORIES.find((c) => c.id === cat)?.label ?? '', hint: '', blocks: list }];
+    if (q || cat !== 'all') return list.length ? [{ id: 'results', label: q ? `${list.length} ready-made space${list.length === 1 ? '' : 's'}` : BLOCK_CATEGORIES.find((c) => c.id === cat)?.label ?? '', hint: q ? '' : BLOCK_CATEGORIES.find((c) => c.id === cat)?.hint ?? '', blocks: list }] : [];
     return BLOCK_CATEGORIES.map((c) => ({ ...c, blocks: list.filter((b) => b.category === c.id) }));
   }, [list, q, cat]);
+  const chip = (id: Cat, label: string) => <button key={id} className={`chip ${cat === id ? 'accent' : ''}`} style={{ border: 0, cursor: 'pointer' }} onClick={() => setCat(id)}>{label}</button>;
+  const outdoorCat = OUTDOOR.includes(cat as BlockCategory) || isTab;
   return (
     <div className="col" style={{ gap: 10 }}>
       <div style={{ position: 'relative' }}>
         <Search size={14} className="muted" style={{ position: 'absolute', left: 9, top: 8 }} />
-        <input className="input" style={{ paddingLeft: 30 }} placeholder="What do you want to add?" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} aria-label="Search ready-made spaces" />
+        <input className="input" style={{ paddingLeft: 30 }} placeholder="What do you want to add?" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} aria-label="Search rooms, plants, paving and garden objects" />
       </div>
       {!q && (
-        <div className="row" style={{ flexWrap: 'wrap', gap: 4 }}>
-          <button className={`chip ${cat === 'all' ? 'accent' : ''}`} style={{ border: 0, cursor: 'pointer' }} onClick={() => setCat('all')}>All</button>
-          {BLOCK_CATEGORIES.map((c) => <button key={c.id} className={`chip ${cat === c.id ? 'accent' : ''}`} style={{ border: 0, cursor: 'pointer' }} onClick={() => setCat(c.id)}>{c.label}</button>)}
+        <div className="col" style={{ gap: 6 }}>
+          <div className="row" style={{ flexWrap: 'wrap', gap: 4 }}>
+            {chip('all', 'All')}
+            {BLOCK_CATEGORIES.filter((c) => INDOOR.includes(c.id)).map((c) => chip(c.id, c.label))}
+          </div>
+          <div className="row" style={{ flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+            <span className="caps" style={{ marginRight: 2 }}>Outdoors</span>
+            {BLOCK_CATEGORIES.filter((c) => OUTDOOR.includes(c.id)).map((c) => chip(c.id, c.label))}
+            {OUTDOOR_TABS.map((t) => chip(t.id, t.label))}
+          </div>
         </div>
       )}
-      {!compact && <div className="tiny muted row" style={{ gap: 6 }}><GripVertical size={12} /> Drag onto the plan, or <MousePointerClick size={12} /> click then click the plan. <b>R</b> rotates.</div>}
+      {!q && (cat === 'all' || outdoorCat) && <GardenDesigner />}
+      {!compact && !isTab && <div className="tiny muted row" style={{ gap: 6 }}><GripVertical size={12} /> Drag onto the plan, or <MousePointerClick size={12} /> click then click the plan. <b>R</b> rotates.</div>}
       {grouped.map((g) => g.blocks.length > 0 && (
         <div key={g.id} className="col" style={{ gap: 8 }}>
           <div><div className="caps">{g.label}</div>{g.hint && <div className="tiny muted">{g.hint}</div>}</div>
           {g.blocks.map((b) => <BlockCard key={b.id} def={b} />)}
         </div>
       ))}
-      {!list.length && <div className="empty small">Nothing matches “{q}”. Try “bedroom”, “bath”, “kitchen”, “stair” or “2bhk”.</div>}
+      {cat === 'plants' && !q && <PlantBrowser />}
+      {cat === 'surfaces' && !q && <SurfaceBrowser />}
+      {cat === 'boundaries' && !q && <BoundaryBrowser />}
+      {cat === 'objects' && !q && <ObjectBrowser />}
+      {q && <SearchExtras q={q} hasBlocks={list.length > 0} />}
     </div>
+  );
+}
+
+/** A search covers everything that can be added, not only rooms. */
+function SearchExtras({ q, hasBlocks }: { q: string; hasBlocks: boolean }) {
+  const plants = searchPlants(q).length;
+  const t = q.toLowerCase();
+  const surfaces = SURFACES.some((s) => `${s.name} ${s.hint} ${s.kind}`.toLowerCase().includes(t));
+  const lines = BOUNDARIES.some((s) => `${s.name} ${s.hint} ${s.kind}`.toLowerCase().includes(t));
+  const objects = ASSETS.some((a) => (a.category === 'outdoor' || a.category === 'garden' || a.category === 'exterior') && `${a.name} ${a.tags.join(' ')}`.toLowerCase().includes(t));
+  if (!hasBlocks && !plants && !surfaces && !lines && !objects) return <div className="empty small">Nothing matches “{q}”. Try “bedroom”, “patio”, “palm”, “hedge”, “fire pit” or “2bhk”.</div>;
+  return (
+    <>
+      {objects && <div className="col" style={{ gap: 8 }}><div className="caps">Garden objects</div><ObjectBrowser query={q} /></div>}
+      {plants > 0 && <div className="col" style={{ gap: 8 }}><div className="caps">{plants} plant{plants === 1 ? '' : 's'}</div><PlantBrowser query={q} /></div>}
+      {surfaces && <div className="col" style={{ gap: 8 }}><div className="caps">Paving & water</div><SurfaceBrowser query={q} /></div>}
+      {lines && <div className="col" style={{ gap: 8 }}><div className="caps">Hedges, fences & walls</div><BoundaryBrowser query={q} /></div>}
+    </>
   );
 }
 

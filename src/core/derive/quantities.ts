@@ -12,7 +12,8 @@ import { deriveLevel } from './level';
 import { wallSides } from './finishes';
 import { computeRoof } from './roof';
 import { computeStair } from './stairs';
-import { area, difference, ensureCCW } from '../geometry/polygon';
+import { area, ensureCCW } from '../geometry/polygon';
+import { COPING_WIDTH, FEATURE_LABEL, TOPSOIL_DEPTH, analyzeLandscape } from './landscape';
 
 export type QtyCategory =
   | 'Masonry' | 'Concrete' | 'Floor finishes' | 'Wall finishes' | 'Exterior finishes' | 'Ceilings' | 'Roofing'
@@ -29,6 +30,11 @@ export interface QtyLine {
   roomId?: string;
   /** Optional direct cost (INR) for items not priced by material rate (furniture, doors, services). */
   directCost?: number;
+  /**
+   * Quantity the material rate applies to, when that isn't the measured quantity —
+   * a fence is measured in running metres but its boarding is priced per m².
+   */
+  priceQuantity?: number;
 }
 
 export interface Takeoff {
@@ -56,12 +62,28 @@ export const SERVICE_ALLOWANCES = [
   { key: 'svc-hvac', item: 'Air-conditioning provision (allowance)', rate: 900 },
 ];
 
+/**
+ * Landscape allowances (INR). Irrigation is per m² served — pipework, emitters or
+ * pop-up heads and a timer, not the water source. Topsoil is per m³ spread.
+ */
+export const LANDSCAPE_RATES = { drip: 140, sprinkler: 110, topsoil: 1100 };
+
+/** Quantity a material's own rate applies to for a run of `length` m, `height` × `width` mm in section. */
+function linearPriceQty(materialId: string, length: number, height: number, width: number): number {
+  const unit = getMaterial(materialId).costUnit;
+  return unit === 'm3' ? (length * height * width) / 1e6 : unit === 'm2' ? (length * height) / 1000 : length;
+}
+
 export function computeTakeoff(doc: ProjectDoc, b: BuildingModel, rules: RuleSet): Takeoff {
   const lines: QtyLine[] = [];
   const add = (l: QtyLine) => {
     if (l.quantity <= 0 && !l.directCost) return;
     const ex = lines.find((x) => x.key === l.key);
-    if (ex) { ex.quantity += l.quantity; if (l.directCost) ex.directCost = (ex.directCost ?? 0) + l.directCost; }
+    if (ex) {
+      ex.quantity += l.quantity;
+      if (l.directCost) ex.directCost = (ex.directCost ?? 0) + l.directCost;
+      if (l.priceQuantity !== undefined) ex.priceQuantity = (ex.priceQuantity ?? 0) + l.priceQuantity;
+    }
     else lines.push({ ...l });
   };
   const s = { floorArea: 0, wallArea: 0, paintArea: 0, roofArea: 0, concreteVolume: 0, masonryVolume: 0, doors: 0, windows: 0, glazingArea: 0, tileArea: 0, ceilingArea: 0, builtUpArea: 0, carpetArea: 0, exteriorWallArea: 0 };
@@ -157,6 +179,8 @@ export function computeTakeoff(doc: ProjectDoc, b: BuildingModel, rules: RuleSet
     for (const f of Object.values(b.furniture).filter((x) => x.levelId === level.id)) {
       const asset = ASSET_BY_ID[f.assetId];
       if (!asset || !asset.price) continue;
+      // Plants and garden structures are landscape works, not loose furniture — they are taken off below.
+      if (asset.plant || asset.category === 'garden') continue;
       add({ key: `furn-${asset.id}`, category: 'Furniture', item: asset.name, quantity: 1, unit: 'nos', levelId: level.id, directCost: asset.price });
     }
   }
@@ -183,20 +207,45 @@ export function computeTakeoff(doc: ProjectDoc, b: BuildingModel, rules: RuleSet
     add({ key: `dp-${roof.id}`, category: 'Roofing', item: 'Downpipes / rainwater outlets', quantity: info.downpipes, unit: 'nos', levelId: level.id, directCost: info.downpipes * 6500 });
   }
 
-  // Landscape
-  const feats = Object.values(doc.site.features);
-  const hardAreas = feats.filter((f) => f.polygon && f.kind !== 'pool').map((f) => f.polygon!);
-  const pools = feats.filter((f) => f.kind === 'pool' && f.polygon);
-  for (const f of feats) {
-    if (!f.polygon) continue;
-    const m = getMaterial(f.materialId ?? (f.kind === 'pool' ? 'pool-water' : f.kind === 'lawn' ? 'lawn' : 'paver'));
-    add({ key: `site-${f.kind}-${m.id}`, category: 'Landscape', item: `${cap(f.kind)} — ${m.name}`, materialId: m.id, quantity: area(f.polygon) / M2, unit: 'm2' });
+  // Landscape — every line comes from the shared analysis, so the BOQ, the L-sheets and Site analysis agree.
+  const la = analyzeLandscape(doc, b);
+  const L: QtyCategory = 'Landscape';
+  const mm = (v: number) => `${+(v / 1000).toFixed(2)} m`;
+  for (const sf of la.surfaces) add({ key: `site-${sf.kind}-${sf.materialId}`, category: L, item: `${FEATURE_LABEL[sf.kind]} — ${sf.material}`, materialId: sf.materialId, quantity: sf.area, unit: 'm2' });
+  add({ key: 'site-lawn', category: L, item: 'Lawn turfing', materialId: 'lawn', quantity: la.areas.lawn, unit: 'm2' });
+  for (const c of la.coping) add({ key: `coping-${c.kind}-${c.materialId}`, category: L, item: `${c.kind === 'pool' ? 'Pool' : 'Pond'} coping — ${c.material}, ${COPING_WIDTH[c.kind]} mm band (${c.length.toFixed(1)} rm)`, materialId: c.materialId, quantity: c.area, unit: 'm2' });
+
+  // Topsoil is part of the standard bed build-up (see the `mulch` material); beds finished in anything else need it bought in.
+  const bedVol = (inRate: boolean) => la.surfaces.filter((x) => x.cls === 'bed' && (x.materialId === 'mulch') === inRate).reduce((t, x) => t + x.area, 0) * (TOPSOIL_DEPTH / 1000);
+  add({ key: 'site-topsoil', category: L, item: `Topsoil to planting beds, ${TOPSOIL_DEPTH} mm deep (supply included in the planting-bed rate)`, quantity: bedVol(true), unit: 'm3' });
+  add({ key: 'site-topsoil-extra', category: L, item: `Topsoil to planting beds, ${TOPSOIL_DEPTH} mm deep (allowance ₹${LANDSCAPE_RATES.topsoil.toLocaleString('en-IN')}/m³)`, quantity: bedVol(false), unit: 'm3', directCost: bedVol(false) * LANDSCAPE_RATES.topsoil });
+
+  for (const p of la.plants) add({ key: `plant-${p.plant.id}`, category: L, item: `${p.plant.common} — ${p.plant.botanical}`, quantity: p.quantity, unit: 'nos', directCost: p.total });
+
+  for (const ln of la.linear) {
+    const h = mm(ln.height);
+    if (ln.kind === 'hedge' && ln.species) {
+      const n = ln.plantCount ?? 0;
+      // One line per hedge: the plant count in the text has to match the length beside it.
+      add({ key: `hedge-${ln.id}`, category: L, item: `Hedge — ${ln.species.common}, ${h} high · ${n} plants at ${ln.species.spacing} mm centres`, materialId: 'hedge', quantity: ln.length, unit: 'rm', directCost: n * ln.species.price });
+    } else if (ln.kind === 'fence') {
+      add({ key: `fence-${ln.materialId}-${ln.height}`, category: L, item: `Fence — ${ln.material}, ${h} high`, materialId: ln.materialId, quantity: ln.length, unit: 'rm', priceQuantity: linearPriceQty(ln.materialId, ln.length, ln.height, ln.width) });
+    } else if (ln.kind === 'wall') {
+      const finish = getMaterial(ln.materialId);
+      // A wall "material" is normally its finish over brick; a core material (brick, block, concrete) is the wall itself.
+      const core = finish.costUnit === 'm3' ? finish : getMaterial('brick');
+      add({ key: `gwall-${core.id}-${ln.height}-${ln.width}`, category: L, item: `Garden wall — ${core.name}, ${h} high × ${Math.round(ln.width)} mm (above ground)`, materialId: core.id, quantity: ln.length, unit: 'rm', priceQuantity: (ln.length * ln.height * ln.width) / 1e6 });
+      if (finish.costUnit === 'm2') add({ key: `gwall-fin-${finish.id}`, category: L, item: `Garden wall finish — ${finish.name} (both faces)`, materialId: finish.id, quantity: ln.faceArea * 2, unit: 'm2' });
+      const cop = getMaterial(String(doc.site.features[ln.id]?.props.coping ?? 'granite-paving'));
+      add({ key: `gwall-cop-${cop.id}`, category: L, item: `Garden wall coping — ${cop.name}`, materialId: cop.id, quantity: ln.length, unit: 'rm', priceQuantity: linearPriceQty(cop.id, ln.length, ln.width + 60, 60) });
+    }
   }
-  const levels0 = levelsSorted(b);
-  const groundFp = levels0.length ? deriveLevel(b, levels0[0].id).footprint : [];
-  const lawn = difference([ensureCCW(doc.site.boundary)], [...groundFp, ...hardAreas, ...pools.map((p) => p.polygon!)]);
-  const lawnArea = lawn.reduce((a, p) => a + area(p.outer) - p.holes.reduce((h, r) => h + area(r), 0), 0);
-  add({ key: 'site-lawn', category: 'Landscape', item: 'Soft landscape (lawn & planting)', materialId: 'lawn', quantity: lawnArea / M2, unit: 'm2' });
+
+  const dripArea = la.areas.beds + la.linear.filter((x) => x.kind === 'hedge').reduce((t, x) => t + (x.length * x.width) / 1000, 0);
+  add({ key: 'irrigation-drip', category: L, item: `Drip irrigation to planting beds and hedges (allowance ₹${LANDSCAPE_RATES.drip}/m²)`, quantity: dripArea, unit: 'm2', directCost: dripArea * LANDSCAPE_RATES.drip });
+  add({ key: 'irrigation-sprinkler', category: L, item: `Pop-up sprinkler irrigation to lawn (allowance ₹${LANDSCAPE_RATES.sprinkler}/m²)`, quantity: la.areas.lawn, unit: 'm2', directCost: la.areas.lawn * LANDSCAPE_RATES.sprinkler });
+
+  for (const st of la.structures) add({ key: `garden-${st.assetId}`, category: L, item: st.name, quantity: st.quantity, unit: 'nos', directCost: st.total });
 
   for (const a of SERVICE_ALLOWANCES) add({ key: a.key, category: 'Services', item: a.item, quantity: s.builtUpArea / M2, unit: 'm2', directCost: (s.builtUpArea / M2) * a.rate });
 

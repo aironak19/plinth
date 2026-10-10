@@ -5,7 +5,7 @@
  * where a safe structured fix exists, carries it as OpCalls to *preview* — fixes
  * are never applied silently.
  */
-import type { BuildingModel, ElementRef, Id, ProjectDoc, Wall } from '../model/types';
+import type { BuildingModel, ElementRef, FurnitureItem, Id, ProjectDoc, SiteFeature, Wall } from '../model/types';
 import type { OpCall } from '../ops/registry';
 import type { RuleSet } from '../rules/rulesets';
 import { levelAbove, levelBelow, levelsSorted, openingsOf, isDoor, wallLength } from '../model/query';
@@ -14,16 +14,21 @@ import { analyzeSite } from './site';
 import { computeStair } from './stairs';
 import { circulation, daylightAnalysis, HABITABLE } from './analysis';
 import { MATERIAL_BY_ID } from '../catalog/materials';
-import { ASSET_BY_ID } from '../catalog/assets';
+import { ASSET_BY_ID, isOutdoorAsset } from '../catalog/assets';
 import { formatArea, formatLength, type UnitSystem } from '../units';
 import { freeEnds } from './walls';
-import { type Vec2, add, dist, lineParam, norm, scale, sub } from '../geometry/vec';
-import { areaWithHoles, difference, pointInPolygon, union } from '../geometry/polygon';
+import { type Vec2, add, dist, lineParam, mid, norm, projectToSegment, scale, sub } from '../geometry/vec';
+import { type Polygon, areaWithHoles, centroid, difference, distToPolygonEdge, pointInPolygon, union } from '../geometry/polygon';
+import type { Plant } from '../catalog/plants';
+import {
+  type LandscapeAnalysis, climateOf, groundFootprint, groundItems, hedgeSpecies, isAreaFeature, isClosedPath, isLinear, isPlayItem, suitsClimate,
+} from './landscape';
+import { linearSpec } from './solids';
 
 export type Severity = 'error' | 'warning' | 'info';
-export type IssueCategory = 'Geometry' | 'Rooms' | 'Openings' | 'Stairs' | 'Site & zoning' | 'Daylight' | 'Accessibility' | 'Circulation' | 'Structure' | 'Documentation' | 'Materials';
+export type IssueCategory = 'Geometry' | 'Rooms' | 'Openings' | 'Stairs' | 'Site & zoning' | 'Daylight' | 'Accessibility' | 'Circulation' | 'Structure' | 'Documentation' | 'Materials' | 'Landscape';
 
-export const CATEGORIES: IssueCategory[] = ['Geometry', 'Rooms', 'Openings', 'Stairs', 'Site & zoning', 'Daylight', 'Accessibility', 'Circulation', 'Structure', 'Documentation', 'Materials'];
+export const CATEGORIES: IssueCategory[] = ['Geometry', 'Rooms', 'Openings', 'Stairs', 'Site & zoning', 'Daylight', 'Accessibility', 'Circulation', 'Structure', 'Landscape', 'Documentation', 'Materials'];
 
 export interface Issue {
   id: string;
@@ -138,7 +143,7 @@ export function validate(doc: ProjectDoc, b: BuildingModel, rules: RuleSet): Hea
     for (const f of Object.values(b.furniture).filter((x) => x.levelId === level.id)) {
       const asset = ASSET_BY_ID[f.assetId];
       if (!asset) { push({ severity: 'warning', category: 'Materials', title: 'Missing library item', detail: 'A placed item refers to an asset that is not in the library.', refs: [{ kind: 'furniture', id: f.id }], levelId: level.id, point: f.position }); continue; }
-      if (asset.category === 'exterior') continue;
+      if (isOutdoorAsset(asset)) continue;
       if (!dl.rooms.some((r) => pointInPolygon(f.position, r.polygon))) push({ severity: 'info', category: 'Geometry', title: `${asset.name} is outside every room`, detail: 'The item sits on or outside a wall.', refs: [{ kind: 'furniture', id: f.id }], levelId: level.id, point: f.position });
     }
   }
@@ -191,6 +196,9 @@ export function validate(doc: ProjectDoc, b: BuildingModel, rules: RuleSet): Hea
   const parking = Math.max(site.parkingProvided, cars);
   if (parking < v.parkingPerUnit) push({ severity: 'warning', category: 'Site & zoning', title: 'Parking shortfall', detail: `${parking} of ${v.parkingPerUnit} required car spaces provided.`, refs: [] });
 
+  // ---- Landscape
+  landscapeRules(doc, b, site.landscape, push, L);
+
   // ---- Documentation & materials
   const tagCount = new Map<string, ElementRef[]>();
   for (const d of Object.values(b.doors)) (tagCount.get(d.tag) ?? tagCount.set(d.tag, []).get(d.tag)!).push({ kind: 'door', id: d.id });
@@ -211,6 +219,168 @@ export function validate(doc: ProjectDoc, b: BuildingModel, rules: RuleSet): Hea
     return { category, status, count: list.length };
   });
   return { score, issues, errors, warnings, infos, categories };
+}
+
+// ---------------------------------------------------------------- landscape
+
+/** Clearances the garden rules check, mm. Horticultural rules of thumb, not regulations. */
+export const LANDSCAPE_RULES = { treeToBuilding: 3000, bigTree: 8000, tallPalm: 9000, palmToParking: 2000, toxicToPlay: 4000 };
+
+/** Plants that are a real risk where small children play, and why. */
+const TOXIC_PLANTS: Record<string, string> = {
+  oleander: 'Every part of oleander is poisonous if chewed or swallowed.',
+  cycas: 'Sago palm seeds and leaves are poisonous if eaten — to children and to pets.',
+};
+
+const distToArea = (p: Vec2, poly: Polygon) => (pointInPolygon(p, poly) ? 0 : distToPolygonEdge(p, poly));
+
+function distToPath(p: Vec2, path: Vec2[]): number {
+  let best = Infinity;
+  for (let i = 0; i + 1 < path.length; i++) best = Math.min(best, projectToSegment(p, path[i], path[i + 1]).dist);
+  return best;
+}
+
+const listOf = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+
+function landscapeRules(doc: ProjectDoc, b: BuildingModel, la: LandscapeAnalysis, push: (i: Omit<Issue, 'id'>) => void, L: (mm: number) => string) {
+  const features = Object.values(doc.site.features);
+  const items = groundItems(b);
+  const plants = items.flatMap((x) => (x.asset.plant ? [{ item: x.item, plant: x.asset.plant }] : []));
+  if (!plants.length && !features.length && !la.plants.length) return;
+  const cat = 'Landscape' as const;
+  const R = LANDSCAPE_RULES;
+  const iref = (it: FurnitureItem): ElementRef => ({ kind: 'furniture', id: it.id });
+  const fref = (f: SiteFeature): ElementRef => ({ kind: 'siteFeature', id: f.id });
+  const areas = features.filter(isAreaFeature);
+  const lines = features.filter(isLinear);
+  const play = items.filter((x) => isPlayItem(x.asset));
+  const plot = doc.site.boundary.length >= 3 ? doc.site.boundary : null;
+  const footprint = groundFootprint(b);
+
+  for (const { item, plant } of plants) {
+    const at = item.position;
+
+    // Large trees hard against the house.
+    if (plant.type === 'tree' && plant.height >= R.bigTree && plant.form !== 'columnar' && footprint.length) {
+      const d = Math.min(...footprint.map((fp) => distToArea(at, fp)));
+      if (d < R.treeToBuilding) push({
+        severity: 'warning', category: cat, title: `${plant.common} is too close to the house`,
+        detail: `It grows to about ${L(plant.height)} tall and ${L(plant.spread)} across, and is planted ${d < 1 ? 'inside the building outline' : `${L(d)} from the wall`}. Keep large trees at least ${L(R.treeToBuilding)} away so roots, branches and falling leaves don’t damage foundations, walls and gutters.`,
+        refs: [iref(item)], levelId: item.levelId, point: at,
+      });
+    }
+
+    // Tall palms over cars and swimmers.
+    if (plant.type === 'palm' && plant.height >= R.tallPalm) {
+      const coconut = plant.id === 'coconut';
+      const drops = coconut ? 'heavy nuts and fronds' : 'large, heavy fronds';
+      const parking = areas.find((f) => f.kind === 'parking' && distToArea(at, f.polygon!) < R.palmToParking);
+      if (parking) push({
+        severity: coconut ? 'warning' : 'info', category: cat, title: `${plant.common} stands over the parking`,
+        detail: `${plant.common}s drop ${drops} from up to ${L(plant.height)}. This one is ${L(distToArea(at, parking.polygon!))} from ${parking.name} — move it at least ${L(R.palmToParking)} clear, or plan for regular trimming, so nothing lands on a car or a person.`,
+        refs: [iref(item), fref(parking)], levelId: item.levelId, point: at,
+      });
+      const pool = areas.find((f) => f.kind === 'pool' && distToArea(at, f.polygon!) < plant.spread / 2);
+      if (pool) push({
+        severity: coconut ? 'warning' : 'info', category: cat, title: `${plant.common} hangs over the pool`,
+        detail: `Its crown spreads about ${L(plant.spread)} and reaches over ${pool.name}, so ${drops} will fall into the water and onto swimmers. Move it back by at least ${L(plant.spread / 2)}, or choose a smaller palm here.`,
+        refs: [iref(item), fref(pool)], levelId: item.levelId, point: at,
+      });
+    }
+
+    // Poisonous plants beside play equipment.
+    const toxic = TOXIC_PLANTS[plant.id];
+    if (toxic && play.length) {
+      const near = play.map((x) => ({ x, d: dist(at, x.item.position) })).sort((p, q) => p.d - q.d)[0];
+      if (near.d < R.toxicToPlay) push({
+        severity: 'warning', category: cat, title: `${plant.common} is poisonous and close to the play area`,
+        detail: `${toxic} This one is ${L(near.d)} from the ${near.x.asset.name.toLowerCase()}. Plant it at least ${L(R.toxicToPlay)} from where children play, or choose a harmless shrub.`,
+        refs: [iref(item), iref(near.x.item)], levelId: item.levelId, point: at,
+      });
+    }
+
+    // Planted on someone else's land.
+    if (plot && !pointInPolygon(at, plot) && distToPolygonEdge(at, plot) > 100) push({
+      severity: 'warning', category: cat, title: `${plant.common} is outside the plot`,
+      detail: `It is planted ${L(distToPolygonEdge(at, plot))} beyond the plot boundary. Move it inside the boundary — this project can only plant on its own land.`,
+      refs: [iref(item)], levelId: item.levelId, point: at,
+    });
+  }
+
+  for (const f of lines) {
+    const path = f.path!;
+    const what = f.kind === 'wall' ? 'garden wall' : f.kind;
+    // A boundary wall sits *on* the plot line, so allow half its thickness plus a little drawing tolerance.
+    const tol = linearSpec(f).width / 2 + 150;
+    if (plot) {
+      const probes = [...path, ...path.slice(1).map((p, i) => mid(path[i], p))];
+      const out = probes.map((p) => (pointInPolygon(p, plot) ? 0 : distToPolygonEdge(p, plot))).filter((d) => d > tol);
+      if (out.length) push({
+        severity: 'warning', category: cat, title: `${f.name} runs outside the plot`,
+        detail: `Part of this ${what} is up to ${L(Math.max(...out))} beyond the plot boundary. Pull it back to the boundary line — this project can only build and plant on its own land.`,
+        refs: [fref(f)], point: probes.find((p) => !pointInPolygon(p, plot) && distToPolygonEdge(p, plot) > tol),
+      });
+    }
+    if (f.kind === 'hedge' && play.length) {
+      const sp = hedgeSpecies(f);
+      const near = play.map((x) => ({ x, d: distToPath(x.item.position, path) })).sort((p, q) => p.d - q.d)[0];
+      if (TOXIC_PLANTS[sp.id] && near.d < R.toxicToPlay) push({
+        severity: 'warning', category: cat, title: `${f.name} is poisonous and close to the play area`,
+        detail: `This hedge is ${sp.common.toLowerCase()}. ${TOXIC_PLANTS[sp.id]} It runs ${L(near.d)} from the ${near.x.asset.name.toLowerCase()} — use a harmless hedging plant here.`,
+        refs: [fref(f), iref(near.x.item)], point: near.x.item.position,
+      });
+    }
+  }
+
+  // Species that don't suit the climate — one note per species, not per plant.
+  const { lat, city } = doc.meta.location;
+  if (Number.isFinite(lat)) {
+    const climate = climateOf(lat);
+    const where = `${city || 'This site'} is treated as a ${climate} climate (judged from its latitude alone)`;
+    const note = (p: Plant, count: string, refs: ElementRef[], point?: Vec2, levelId?: Id) => push({
+      severity: 'info', category: cat, title: `${p.common} may not suit this climate`,
+      detail: `${where}. ${p.common} (${p.botanical}) does best in ${listOf(p.climates.filter((c, i, a) => a.indexOf(c) === i))} conditions, so ${count} may struggle — check with a local nursery before buying.`,
+      refs, point, levelId,
+    });
+    const flagged = new Set<string>();
+    for (const ln of la.plants) {
+      if (suitsClimate(ln.plant, lat)) continue;
+      flagged.add(ln.plant.id);
+      const first = b.furniture[ln.itemIds[0]];
+      note(ln.plant, ln.quantity === 1 ? 'the one placed here' : `the ${ln.quantity} placed here`, ln.itemIds.map((id) => ({ kind: 'furniture' as const, id })), first?.position, first?.levelId);
+    }
+    for (const f of lines) {
+      if (f.kind !== 'hedge') continue;
+      const sp = hedgeSpecies(f);
+      if (suitsClimate(sp, lat) || flagged.has(sp.id)) continue;
+      flagged.add(sp.id);
+      note(sp, `the hedge “${f.name}”`, [fref(f)], f.path![0]);
+    }
+  }
+
+  // A pool that children at play can walk straight to.
+  if (play.length) {
+    const loops = lines.filter((f) => isClosedPath(f.path!)).map((f) => f.path!.slice(0, -1));
+    for (const pool of areas.filter((f) => f.kind === 'pool')) {
+      // Only a barrier with the pool inside and the play equipment outside separates the two.
+      const guarded = loops.some((loop) => pool.polygon!.every((v) => pointInPolygon(v, loop)) && !play.some((x) => pointInPolygon(x.item.position, loop)));
+      if (!guarded) push({
+        severity: 'info', category: cat, title: `${pool.name} is open to the play area`,
+        detail: `There is play equipment on the site (${play[0].asset.name.toLowerCase()}) and no fence, wall or hedge runs all the way round the pool. A closed barrier with a gate keeps small children from reaching the water on their own.`,
+        refs: [fref(pool)], point: centroid(pool.polygon!),
+      });
+    }
+  }
+
+  // Beds drawn but never planted.
+  for (const bed of areas.filter((f) => f.kind === 'bed' || f.kind === 'planter')) {
+    if (plants.some((x) => pointInPolygon(x.item.position, bed.polygon!))) continue;
+    push({
+      severity: 'info', category: cat, title: `${bed.name} has no plants`,
+      detail: 'This planting bed is empty. Add shrubs, groundcover or flowers to it, or change it to lawn or gravel so the drawings and the estimate match what will be built.',
+      refs: [fref(bed)], point: centroid(bed.polygon!),
+    });
+  }
 }
 
 function collinearOverlap(a: Wall, b: Wall): number {

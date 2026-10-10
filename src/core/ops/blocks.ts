@@ -95,7 +95,7 @@ function placeKit(ctx: OpContext, p: { levelId: Id }, pl: Placement): string[] {
   return created;
 }
 
-defineOp<{ blockId: string; size?: string; levelId: Id; x: number; y: number; rotation?: number }>({
+defineOp<{ blockId: string; size?: string; levelId: Id; x: number; y: number; rotation?: number; auto?: boolean }>({
   type: 'block.place', title: 'Add ready-made space', cap: 'model.edit', model: true,
   description: 'Drop a ready-made block (e.g. bedroom-bath, master-suite, kitchen-l, living-dining, foyer, stair-u, balcony, garage, pool, kit-2bhk) with its lower-left corner at (x, y) mm, rotated by 0/90/180/270°. Walls are shared with neighbours, a door connects it to the best adjacent room, and windows and furniture are added.',
   schema: { type: 'object', properties: { blockId: { type: 'string' }, size: { type: 'string', enum: ['S', 'M', 'L'] }, levelId: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, rotation: { type: 'number', enum: [0, 90, 180, 270] } }, required: ['blockId', 'levelId', 'x', 'y'] },
@@ -117,12 +117,16 @@ defineOp<{ blockId: string; size?: string; levelId: Id; x: number; y: number; ro
     // ---- site-only blocks
     if (def.siteOnly) {
       const ground = levelsSorted(ctx.b as BuildingModel)[0];
+      const made: string[] = [];
       for (const s of pl.site) {
         const id = uid('sf');
+        made.push(id);
         ctx.doc.site.features[id] = { id, kind: s.kind, name: s.name, polygon: [{ x: s.rect.x, y: s.rect.y }, { x: s.rect.x + s.rect.w, y: s.rect.y }, { x: s.rect.x + s.rect.w, y: s.rect.y + s.rect.h }, { x: s.rect.x, y: s.rect.y + s.rect.h }], materialId: s.material, props: s.kind === 'parking' ? { spaces: s.cars ?? 0 } : {} };
         ctx.created.push({ kind: 'siteFeature', id });
       }
-      for (const pr of pl.props) { const f = makeFurniture({ levelId: ground.id, assetId: pr.asset, position: pr.p, rotation: pr.rot, variant: pr.variant }); ctx.b.furniture[f.id] = f; }
+      for (const pr of pl.props) { const f = makeFurniture({ levelId: ground.id, assetId: pr.asset, position: pr.p, rotation: pr.rot, variant: pr.variant, props: p.auto ? { auto: true } : {} }); ctx.b.furniture[f.id] = f; }
+      // Items laid by "Landscape my plot" are tagged so a re-run replaces them and leaves hand-placed work alone.
+      if (p.auto) for (const id of made) ctx.doc.site.features[id].props = { ...ctx.doc.site.features[id].props, auto: true };
       ctx.notes.push(`${def.name} added (${dims})`);
       return;
     }
@@ -317,18 +321,18 @@ export function findAttachPosition(b: BuildingModel, levelId: Id, tagId: Id, blo
  * the boundary, clear of the building and other site features, as close to
  * the road as possible, and flush against the house when it can be.
  */
-export function findSitePosition(doc: ProjectDoc, b: BuildingModel, blockId: string, sizeId?: string, near?: Vec2): { x: number; y: number; rotation: number } | null {
+export function findSitePosition(doc: ProjectDoc, b: BuildingModel, blockId: string, sizeId?: string, near?: Vec2, opts: { roadWeight?: number; step?: number; clear?: Vec2[][]; nearWeight?: number } = {}): { x: number; y: number; rotation: number } | null {
   const def = BLOCK_BY_ID[blockId];
   const ground = levelsSorted(b)[0];
   if (!def?.siteOnly || !ground) return null;
   const plot = doc.site.boundary.length > 2 ? doc.site.boundary : ensureCCW(doc.site.boundary);
   const edges = plot.map((p, i) => ({ p, q: plot[(i + 1) % plot.length], e: doc.site.edges[i] }));
   const roads = edges.filter((x) => x.e?.road).length ? edges.filter((x) => x.e?.road) : edges.filter((x) => x.e?.kind === 'front');
-  const others = Object.values(doc.site.features).filter((f) => f.polygon && f.polygon.length > 2).map((f) => f.polygon!);
+  const others = [...Object.values(doc.site.features).filter((f) => f.polygon && f.polygon.length > 2).map((f) => f.polygon!), ...(opts.clear ?? [])];
   const rings = siteSnapRings(b, plot);
   const fp = deriveLevel(b, ground.id).footprint;
   const pb = bbox(plot);
-  const step = 610;
+  const step = opts.step ?? 610;
   const valid = (x: number, y: number, rotation: number) => {
     const pl = layoutBlock(def.id, sizeId, x, y, rotation);
     const corners = [{ x: pl.x, y: pl.y }, { x: pl.x + pl.w, y: pl.y }, { x: pl.x + pl.w, y: pl.y + pl.d }, { x: pl.x, y: pl.y + pl.d }];
@@ -352,7 +356,7 @@ export function findSitePosition(doc: ProjectDoc, b: BuildingModel, blockId: str
         const pc = { x: pos.x + w / 2, y: pos.y + d / 2 };
         const toRoad = roads.length ? Math.min(...roads.map((e) => projectToSegment(pc, e.p, e.q).dist)) : 0;
         const touches = fp.some((f) => { const fb = bbox(f); return pos.x <= fb.maxX + 50 && pos.x + w >= fb.minX - 50 && pos.y <= fb.maxY + 50 && pos.y + d >= fb.minY - 50; });
-        const score = -toRoad / 1000 + (touches ? 2 : 0) - (near ? Math.hypot(pc.x - near.x, pc.y - near.y) / 4000 : 0);
+        const score = (-toRoad / 1000) * (opts.roadWeight ?? 1) + (touches ? 2 : 0) - (near ? (Math.hypot(pc.x - near.x, pc.y - near.y) / 4000) * (opts.nearWeight ?? 1) : 0);
         if (!best || score > best.score) best = { ...pos, rotation, score };
       }
     }

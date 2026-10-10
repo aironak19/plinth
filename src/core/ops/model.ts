@@ -584,7 +584,7 @@ defineOp<{ id: Id; patch: Partial<Omit<import('../model/types').Column, 'id'>> }
   },
 });
 
-defineOp<{ levelId: Id; assetId: string; position: Vec2; rotation?: number; variant?: string }>({
+defineOp<{ levelId: Id; assetId: string; position: Vec2; rotation?: number; variant?: string ; size?: { w: number; d: number; h: number }; props?: Record<string, string | number | boolean> }>({
   type: 'furniture.create', title: 'Place furniture', cap: 'model.edit', model: true,
   description: 'Place an asset from the library (e.g. bed-king, sofa-3, dining-6, wc, tree, car-suv).',
   schema: { type: 'object', properties: { levelId: { type: 'string' }, assetId: { type: 'string' }, position: vec2, rotation: { type: 'number' } }, required: ['levelId', 'assetId', 'position'] },
@@ -592,7 +592,8 @@ defineOp<{ levelId: Id; assetId: string; position: Vec2; rotation?: number; vari
     requireLevel(ctx, p.levelId);
     const asset = ASSET_BY_ID[p.assetId];
     if (!asset) throw new OpError('No asset', 'That item isn’t in the library.');
-    const f = makeFurniture(p);
+    // Copy what the caller passed: operation parameters may be reused, and the document owns its own data.
+    const f = makeFurniture({ ...p, position: { x: p.position.x, y: p.position.y }, props: { ...(p.props ?? {}) }, ...(p.size ? { size: { ...p.size } } : {}) });
     ctx.b.furniture[f.id] = f;
     ctx.created.push({ kind: 'furniture', id: f.id });
     ctx.notes.push(`${asset.name} placed`);
@@ -639,6 +640,7 @@ defineOp<{ refs: ElementRef[]; delta: Vec2 }>({
           const f = ctx.doc.site.features[r.id];
           if (!f) break;
           if (f.polygon) f.polygon = f.polygon.map((q) => add(q, p.delta));
+          if (f.path) f.path = f.path.map((q) => add(q, p.delta));
           if (f.position) f.position = add(f.position, p.delta);
           break;
         }

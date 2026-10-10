@@ -47,12 +47,16 @@ export function estimateCost(doc: ProjectDoc, b: BuildingModel, rules: RuleSet):
       material = l.directCost;
     } else if (l.materialId) {
       const r = rateFor(getMaterial(l.materialId), settings);
-      material = r.material * l.quantity;
-      labour = r.labour * l.quantity;
+      // Linear landscape items are measured in running metres but priced on their face area or volume.
+      const q = l.priceQuantity ?? l.quantity;
+      material = r.material * q;
+      labour = r.labour * q;
     }
     const total = (material + labour) * fx;
     return { ...l, rate: l.quantity ? total / l.quantity : 0, material: material * fx, labour: labour * fx, total };
   });
+  // FF&E is the 'Furniture' category only. The takeoff files plants, hedges and garden structures
+  // (pergolas, gates, lights) under 'Landscape', so they are always in the construction total and never in FF&E.
   const counted = (l: CostLine) => settings.includeFFE || l.category !== 'Furniture';
   const ffeTotal = lines.filter((l) => l.category === 'Furniture').reduce((s, l) => s + l.total, 0);
   const sum = (f: (l: CostLine) => number) => lines.filter(counted).reduce((s, l) => s + f(l), 0);
@@ -86,6 +90,9 @@ export function estimateCost(doc: ProjectDoc, b: BuildingModel, rules: RuleSet):
       `Labour factor ×${settings.labourFactor.toFixed(2)}, contractor margin ${(settings.contractorMargin * 100).toFixed(0)}%, contingency ${(settings.contingency * 100).toFixed(0)}%, tax ${(settings.taxRate * 100).toFixed(0)}%.`,
       settings.includeFFE ? 'Loose furniture (FF&E) is included in the total.' : 'Loose furniture (FF&E) is listed separately and excluded from the construction total.',
       'Services (electrical, plumbing, HVAC) are per-m² allowances, not measured quantities.',
+      ...(lines.some((l) => l.category === 'Landscape')
+        ? ['Landscape covers paving, lawn, planting at nursery size, hedges, fences, garden walls above ground and garden structures, and is always in the total; outdoor furniture stays with FF&E. Irrigation is a per-m² allowance.']
+        : []),
       'Structure is conceptual — quantities exclude reinforcement steel and foundations until an engineered design is linked.',
     ],
   };

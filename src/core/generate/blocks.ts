@@ -6,7 +6,7 @@
  */
 import type { BuildingModel, Id, RoomFunction, Wall } from '../model/types';
 import { BLOCK_BY_ID, blockSize, type BlockDef, type BlockPart, type BlockSize, type ItemSpec, type Side } from '../catalog/blocks';
-import { ASSET_BY_ID } from '../catalog/assets';
+import { ASSET_BY_ID, isOutdoorAsset } from '../catalog/assets';
 import { ft } from '../units';
 import { deriveLevel } from '../derive/level';
 import { intersection, rectPolygon, areaWithHoles, bbox } from '../geometry/polygon';
@@ -75,7 +75,7 @@ export function kitData(def: BlockDef, size: BlockSize): KitData | null {
   }
   const b = best!.b;
   // Exterior props (cars, trees) don't belong to a kit.
-  for (const f of Object.values(b.furniture)) if (ASSET_BY_ID[f.assetId]?.category === 'exterior') delete b.furniture[f.id];
+  for (const f of Object.values(b.furniture)) if (isOutdoorAsset(ASSET_BY_ID[f.assetId])) delete b.furniture[f.id];
   b.roofs = {};
   const level = levelsSorted(b)[0];
   const walls = Object.values(b.walls);

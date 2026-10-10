@@ -301,3 +301,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
   .rail .rail-sep { display: none; }
   .workspace { padding-bottom: 58px; }
 }
+
+/* 3D toolbar sits under the view switch; its labels give way to icons when the canvas is narrow. */
+@container (max-width: 1240px) { .v3d-bar .tb-l { display: none; } }
+.v3d-bar button:disabled { opacity: 0.4; pointer-events: none; }

@@ -52,7 +52,8 @@ defineOp<Omit<SiteFeature, 'id' | 'props'> & { props?: SiteFeature['props'] }>({
   description: 'Add a pool, driveway, lawn, deck, parking bay, pathway, planter or tree to the site.',
   schema: { type: 'object', properties: { kind: { type: 'string' }, name: { type: 'string' }, polygon: { type: 'array', items: vec2 }, position: vec2 }, required: ['kind', 'name'] },
   run(ctx, p) {
-    const f: SiteFeature = { id: uid('sf'), props: {}, ...p };
+    // Copy what the caller passed: operation parameters may be reused, and the document owns its own data.
+    const f: SiteFeature = { id: uid('sf'), ...p, props: { ...(p.props ?? {}) }, ...(p.polygon ? { polygon: p.polygon.map((q) => ({ x: q.x, y: q.y })) } : {}), ...(p.path ? { path: p.path.map((q) => ({ x: q.x, y: q.y })) } : {}) };
     ctx.doc.site.features[f.id] = f;
     ctx.created.push({ kind: 'siteFeature', id: f.id });
     ctx.notes.push(`${p.name} added to site`);
@@ -68,6 +69,18 @@ defineOp<{ id: Id; patch: Partial<Omit<SiteFeature, 'id'>> }>({
     if (!f) throw new OpError('No feature', 'That site feature no longer exists.');
     Object.assign(f, p.patch);
     ctx.notes.push(`${f.name} updated`);
+  },
+});
+
+defineOp<Record<string, never>>({
+  type: 'landscape.clear', title: 'Clear generated landscape', cap: 'model.edit', model: true,
+  description: 'Remove everything laid by the automatic landscape designer (hand-placed items stay).',
+  schema: { type: 'object', properties: {} },
+  run(ctx) {
+    let n = 0;
+    for (const f of Object.values(ctx.doc.site.features)) if (f.props.auto) { delete ctx.doc.site.features[f.id]; n++; }
+    for (const f of Object.values(ctx.b.furniture)) if (f.props.auto) { delete ctx.b.furniture[f.id]; n++; }
+    if (n) ctx.notes.push(`${n} generated landscape items removed`);
   },
 });
 

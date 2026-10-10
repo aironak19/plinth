@@ -14,7 +14,9 @@ import { computeStair } from '../../core/derive/stairs';
 import { buildableZone, analyzeSite } from '../../core/derive/site';
 import { validate } from '../../core/derive/validation';
 import { doorSymbol, windowSymbol, stairSymbol, furnitureSymbol, columnSymbol, primPath, type Prim } from '../../core/docs/symbols';
-import { ASSET_BY_ID } from '../../core/catalog/assets';
+import { ASSET_BY_ID, isGroundAsset } from '../../core/catalog/assets';
+import type { SiteFeature } from '../../core/model/types';
+import { linearSpec } from '../../core/derive/solids';
 import { formatArea, formatLength, parseLength } from '../../core/units';
 import { type Vec2, add, dist, mid, norm, perp, scale, sub, lineParam, dot, projectToSegment } from '../../core/geometry/vec';
 import { bbox, pointInPolygon, rectPolygon, difference, areaWithHoles, ensureCCW } from '../../core/geometry/polygon';
@@ -32,15 +34,42 @@ type Drag =
   | { kind: 'endpoint'; wallId: string; end: 'a' | 'b'; cur: Vec2 }
   | { kind: 'edge'; tagId: string; axis: 'x' | 'y'; side: 'min' | 'max'; start: Vec2; cur: Vec2; size: number }
   | { kind: 'marquee'; start: Vec2; cur: Vec2 }
-  | { kind: 'room'; start: Vec2; cur: Vec2 };
+  | { kind: 'room'; start: Vec2; cur: Vec2 }
+  | { kind: 'surface'; start: Vec2; cur: Vec2 };
 
 const STROKE: Record<string, number> = { cut: 1.6, heavy: 1.3, medium: 1, light: 0.7, hairline: 0.55 };
+
+const FEATURE_FILL: Record<string, string> = {
+  pool: 'rgba(95,180,201,0.38)', pond: 'rgba(79,140,125,0.4)', deck: 'rgba(155,107,68,0.2)', lawn: 'rgba(120,165,90,0.24)', bed: 'rgba(120,95,65,0.2)',
+  gravel: 'rgba(190,184,170,0.35)', patio: 'rgba(205,184,146,0.34)', driveway: 'rgba(150,145,135,0.2)', parking: 'rgba(150,145,135,0.16)', pathway: 'rgba(170,160,140,0.3)',
+};
+const FEATURE_PATTERN: Record<string, string> = { patio: 'pat-paving', pathway: 'pat-paving', deck: 'pat-deck', gravel: 'pat-gravel', bed: 'pat-bed', pool: 'pat-water', pond: 'pat-water' };
+
+/** Hedges, fences and garden walls drawn at their true thickness. */
+function LinearFeature({ f, on, hov }: { f: SiteFeature; on: boolean; hov: boolean }) {
+  const { width } = linearSpec(f);
+  const d = lineD(f.path!);
+  const accent = on || hov;
+  if (f.kind === 'hedge') return (
+    <g>
+      <path d={d} fill="none" stroke={accent ? 'var(--accent)' : '#5f8f4b'} strokeOpacity={on ? 0.75 : 0.6} strokeWidth={width} strokeLinejoin="round" strokeLinecap="round" />
+      <path d={d} fill="none" stroke="#33592c" strokeWidth={1} strokeDasharray="2 5" vectorEffect="non-scaling-stroke" />
+    </g>
+  );
+  if (f.kind === 'fence') return (
+    <g>
+      <path d={d} fill="none" stroke="transparent" strokeWidth={Math.max(width, 300)} />
+      <path d={d} fill="none" stroke={accent ? 'var(--accent)' : 'var(--plan-line)'} strokeWidth={on ? 2.2 : 1.4} strokeDasharray="12 3 2 3" vectorEffect="non-scaling-stroke" />
+    </g>
+  );
+  return <path d={d} fill="none" stroke={accent ? 'var(--accent)' : 'var(--poche)'} strokeOpacity={on ? 0.9 : 0.78} strokeWidth={width} strokeLinejoin="miter" />;
+}
 
 export function PlanView({ levelId }: { levelId: string }) {
   const doc = useDoc();
   const rules = useRules();
   const s = useStore();
-  const { selection, tool, layers, snap, proposal, placeAsset, placeRotation, focus, placeBlock } = s;
+  const { selection, tool, layers, snap, proposal, placeAsset, placeRotation, focus, placeBlock, placeSite } = s;
   const units = doc.meta.units;
   const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 600 });
@@ -85,6 +114,7 @@ export function PlanView({ levelId }: { levelId: string }) {
   const below = level ? levelBelow(b, levelId) : undefined;
   const dlBelow = useMemo(() => (below && layers.levelBelow ? deriveLevel(b, below.id) : null), [b, below, layers.levelBelow]);
   const health = useMemo(() => (layers.issues ? validate(doc, activeBuilding(doc), rules) : null), [doc, rules, layers.issues]);
+  const groundId = useMemo(() => { const ls = Object.values(b.levels).sort((x, y) => x.order - y.order); return (ls.find((l) => l.elevation >= 0) ?? ls[0])?.id; }, [b.levels]);
   const isGround = useMemo(() => { const ls = Object.values(b.levels).sort((x, y) => x.order - y.order); return ls.find((l) => l.elevation >= 0)?.id === levelId || ls[0]?.id === levelId; }, [b.levels, levelId]);
   const siteA = useMemo(() => (layers.site && isGround ? { zone: buildableZone(doc.site), analysis: analyzeSite(doc, activeBuilding(doc), rules) } : null), [doc, rules, layers.site, isGround]);
 
@@ -168,9 +198,17 @@ export function PlanView({ levelId }: { levelId: string }) {
       }
     };
     const up = (e: KeyboardEvent) => { if (e.code === 'Space') setSpace(false); };
+    const linearKeys = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (tool !== 'linear' || !chain.length || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return;
+      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); finishLinear(chain); }
+      else if (e.key === 'Escape') { e.stopPropagation(); setChain([]); }
+    };
+    window.addEventListener('keydown', linearKeys, true);
     window.addEventListener('keydown', down, true);
     window.addEventListener('keyup', up);
-    return () => { window.removeEventListener('keydown', down, true); window.removeEventListener('keyup', up); };
+    return () => { window.removeEventListener('keydown', down, true); window.removeEventListener('keydown', linearKeys, true); window.removeEventListener('keyup', up); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tool, chain, typed, cursor, snapRes, units, levelId, s]);
 
   // ---- wheel: pan / zoom at cursor (native listener so we can preventDefault)
@@ -250,7 +288,7 @@ export function PlanView({ levelId }: { levelId: string }) {
       return;
     }
     if (tool === 'block') { dropBlock(); return; }
-    const sn = computeSnap(p, tool === 'wall' ? chain[chain.length - 1] : null);
+    const sn = computeSnap(p, tool === 'wall' || tool === 'linear' ? chain[chain.length - 1] : null);
     if (tool === 'wall') {
       if (!chain.length) { setChain([sn.p]); return; }
       const from = chain[chain.length - 1];
@@ -262,6 +300,12 @@ export function PlanView({ levelId }: { levelId: string }) {
       return;
     }
     if (tool === 'room') { setDrag({ kind: 'room', start: sn.p, cur: sn.p }); return; }
+    if (tool === 'surface' && placeSite) { setDrag({ kind: 'surface', start: sn.p, cur: sn.p }); return; }
+    if (tool === 'linear' && placeSite) {
+      if (chain.length > 1 && dist(sn.p, chain[0]) < Math.max(200, 12 / v.z)) { finishLinear([...chain, chain[0]]); return; }
+      if (!chain.length || dist(chain[chain.length - 1], sn.p) > 100) setChain([...chain, sn.p]);
+      return;
+    }
     if (tool === 'door' || tool === 'window') {
       const w = nearestWall(p);
       if (!w) { s.toast('Click on a wall to place an opening'); return; }
@@ -272,7 +316,12 @@ export function PlanView({ levelId }: { levelId: string }) {
     }
     if (tool === 'stair') { s.dispatch([{ type: 'stair.create', params: { levelId, origin: { x: sn.p.x - 1075, y: sn.p.y }, kind: 'U', width: 1000 } }]); s.setTool('select'); return; }
     if (tool === 'column') { s.dispatch([{ type: 'column.create', params: { levelId, position: sn.p } }], { silent: true }); return; }
-    if (tool === 'place' && placeAsset) { s.dispatch([{ type: 'furniture.create', params: { levelId, assetId: placeAsset, position: sn.p, rotation: placeRotation } }]); return; }
+    if (tool === 'place' && placeAsset) {
+      // Trees, garden structures and vehicles always belong to the ground, whichever floor is being viewed.
+      const onGround = isGroundAsset(ASSET_BY_ID[placeAsset]);
+      s.dispatch([{ type: 'furniture.create', params: { levelId: onGround ? groundId ?? levelId : levelId, assetId: placeAsset, position: onGround || ASSET_BY_ID[placeAsset]?.plant ? (cursor ?? sn.p) : sn.p, rotation: placeRotation } }], { silent: !!ASSET_BY_ID[placeAsset]?.plant });
+      return;
+    }
     if (tool === 'comment') { setCommentAt({ p, sx, sy }); return; }
   };
 
@@ -297,12 +346,12 @@ export function PlanView({ levelId }: { levelId: string }) {
       return;
     }
     if (drag?.kind === 'marquee') { setDrag({ ...drag, cur: p }); return; }
-    if (drag?.kind === 'room') { const sn = computeSnap(p); setSnapRes(sn); setDrag({ ...drag, cur: sn.p }); return; }
+    if (drag?.kind === 'room' || drag?.kind === 'surface') { const sn = computeSnap(p); setSnapRes(sn); setDrag({ ...drag, cur: sn.p }); return; }
     if (tool === 'select') {
       const hit = hitTest(liveDoc, b, dl, p, tolMm, rules, { site: !!siteA, furniture: layers.furniture });
       s.setHover(hit);
       setSnapRes(null);
-    } else if (tool !== 'pan' && tool !== 'block') setSnapRes(computeSnap(p, tool === 'wall' ? chain[chain.length - 1] : null));
+    } else if (tool !== 'pan' && tool !== 'block') setSnapRes(computeSnap(p, tool === 'wall' || tool === 'linear' ? chain[chain.length - 1] : null));
   };
 
   const onPointerUp = () => {
@@ -322,6 +371,13 @@ export function PlanView({ levelId }: { levelId: string }) {
       const x0 = Math.min(drag.start.x, drag.cur.x), y0 = Math.min(drag.start.y, drag.cur.y);
       const w = Math.abs(drag.cur.x - drag.start.x), h = Math.abs(drag.cur.y - drag.start.y);
       if (w > 600 && h > 600) s.dispatch([{ type: 'room.create', params: { levelId, x: x0, y: y0, w, h, name: 'New Room', fn: 'other' } }]);
+    } else if (drag.kind === 'surface' && placeSite) {
+      const x0 = Math.min(drag.start.x, drag.cur.x), y0 = Math.min(drag.start.y, drag.cur.y);
+      const w = Math.abs(drag.cur.x - drag.start.x), h = Math.abs(drag.cur.y - drag.start.y);
+      if (w > 300 && h > 300) {
+        s.dispatch([{ type: 'site.feature.create', params: { kind: placeSite.kind, name: placeSite.name, polygon: [{ x: x0, y: y0 }, { x: x0 + w, y: y0 }, { x: x0 + w, y: y0 + h }, { x: x0, y: y0 + h }], materialId: placeSite.material, props: placeSite.props ?? {} } }]);
+        s.setTool('select');
+      }
     } else if (dragOps) {
       s.dispatch(dragOps, { keepSelection: true });
     }
@@ -329,8 +385,18 @@ export function PlanView({ levelId }: { levelId: string }) {
     setSnapRes(null);
   };
 
+  /** Turn the clicked points into a hedge, fence or garden wall. */
+  function finishLinear(pts: Vec2[]) {
+    const spec = useStore.getState().placeSite;
+    setChain([]);
+    if (!spec || pts.length < 2) return;
+    s.dispatch([{ type: 'site.feature.create', params: { kind: spec.kind, name: spec.name, path: pts, materialId: spec.material, props: spec.props ?? {} } }]);
+    s.setTool('select');
+  }
+
   const onDoubleClick = (e: React.MouseEvent) => {
     if (tool === 'wall') { setChain([]); return; }
+    if (tool === 'linear') { finishLinear(chain); return; }
     const r = svgRef.current!.getBoundingClientRect();
     const p = toWorld(e.clientX - r.left, e.clientY - r.top);
     const room = dl.rooms.find((x) => x.tagId && pointInPolygon(p, x.polygon));
@@ -386,11 +452,22 @@ export function PlanView({ levelId }: { levelId: string }) {
             : <g key={u.id} opacity={u.opacity}>{u.lines?.map((l, i) => <line key={i} x1={l.a.x} y1={-l.a.y} x2={l.b.x} y2={-l.b.y} stroke="#7a8db8" strokeWidth={0.8} vectorEffect="non-scaling-stroke" />)}</g>)}
           {siteA && (
             <g>
+              <defs>
+                <pattern id="pat-paving" width="600" height="600" patternUnits="userSpaceOnUse"><path d="M0 0H600M0 0V600" fill="none" stroke="rgba(90,80,65,0.35)" strokeWidth="14" /></pattern>
+                <pattern id="pat-deck" width="150" height="150" patternUnits="userSpaceOnUse"><path d="M0 0H150" fill="none" stroke="rgba(110,70,40,0.4)" strokeWidth="12" /></pattern>
+                <pattern id="pat-gravel" width="320" height="320" patternUnits="userSpaceOnUse"><circle cx="60" cy="70" r="18" fill="rgba(90,85,75,0.4)" /><circle cx="210" cy="40" r="14" fill="rgba(90,85,75,0.3)" /><circle cx="150" cy="200" r="20" fill="rgba(90,85,75,0.35)" /><circle cx="280" cy="250" r="13" fill="rgba(90,85,75,0.3)" /></pattern>
+                <pattern id="pat-bed" width="420" height="420" patternUnits="userSpaceOnUse"><path d="M60 110l50 -60M250 300l50 -60M290 110l-40 -50M110 330l-40 -50" fill="none" stroke="rgba(70,110,55,0.55)" strokeWidth="16" strokeLinecap="round" /></pattern>
+                <pattern id="pat-water" width="900" height="500" patternUnits="userSpaceOnUse"><path d="M40 250q110 -70 220 0t220 0" fill="none" stroke="rgba(40,110,140,0.4)" strokeWidth="14" /></pattern>
+              </defs>
               <path d={ringD(doc.site.boundary)} fill="rgba(143,174,107,0.10)" stroke="var(--ink-3)" strokeWidth={1.4} strokeDasharray="10 4 2 4" vectorEffect="non-scaling-stroke" />
               {siteA.zone.map((z, i) => <path key={i} d={ringD(z.outer) + z.holes.map(ringD).join('')} fill="none" stroke="var(--accent)" strokeOpacity={0.45} strokeWidth={1} strokeDasharray="5 4" vectorEffect="non-scaling-stroke" />)}
               {Object.values(doc.site.features).map((f) => f.polygon && (
-                <path key={f.id} d={ringD(f.polygon)} fill={f.kind === 'pool' ? 'rgba(95,180,201,0.35)' : f.kind === 'deck' ? 'rgba(155,107,68,0.16)' : 'rgba(150,145,135,0.13)'} stroke={selected({ kind: 'siteFeature', id: f.id }) ? 'var(--accent)' : 'var(--plan-light)'} strokeWidth={selected({ kind: 'siteFeature', id: f.id }) ? 2 : 0.8} vectorEffect="non-scaling-stroke" />
+                <g key={f.id}>
+                  <path d={ringD(f.polygon)} fill={FEATURE_FILL[f.kind] ?? 'rgba(150,145,135,0.13)'} stroke={selected({ kind: 'siteFeature', id: f.id }) ? 'var(--accent)' : 'var(--plan-light)'} strokeWidth={selected({ kind: 'siteFeature', id: f.id }) ? 2 : 0.8} vectorEffect="non-scaling-stroke" />
+                  {FEATURE_PATTERN[f.kind] && <path d={ringD(f.polygon)} fill={`url(#${FEATURE_PATTERN[f.kind]})`} style={{ pointerEvents: 'none' }} />}
+                </g>
               ))}
+              {Object.values(doc.site.features).map((f) => f.path && f.path.length > 1 && <LinearFeature key={f.id} f={f} on={selected({ kind: 'siteFeature', id: f.id })} hov={hover?.kind === 'siteFeature' && hover.id === f.id} />)}
               {siteA.analysis.violations.map((z, i) => <path key={`v${i}`} d={ringD(z.outer)} fill="rgba(194,65,58,0.25)" stroke="var(--err)" strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
             </g>
           )}
@@ -430,13 +507,13 @@ export function PlanView({ levelId }: { levelId: string }) {
             );
           })()}
           {snapRes?.guides.map(([a, c], i) => <line key={`g${i}`} x1={a.x} y1={-a.y} x2={c.x} y2={-c.y} stroke="var(--accent)" strokeWidth={0.8} strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />)}
-          {tool === 'wall' && chain.length > 0 && (
+          {(tool === 'wall' || tool === 'linear') && chain.length > 0 && (
             <g>
               <path d={lineD(chain)} fill="none" stroke="var(--accent)" strokeWidth={2} vectorEffect="non-scaling-stroke" />
               {cursor && <line x1={chain[chain.length - 1].x} y1={-chain[chain.length - 1].y} x2={(snapRes?.p ?? cursor).x} y2={-(snapRes?.p ?? cursor).y} stroke="var(--accent)" strokeWidth={2} strokeDasharray="6 4" vectorEffect="non-scaling-stroke" />}
             </g>
           )}
-          {drag?.kind === 'room' && <rect x={Math.min(drag.start.x, drag.cur.x)} y={-Math.max(drag.start.y, drag.cur.y)} width={Math.abs(drag.cur.x - drag.start.x)} height={Math.abs(drag.cur.y - drag.start.y)} fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
+          {(drag?.kind === 'room' || drag?.kind === 'surface') && <rect x={Math.min(drag.start.x, drag.cur.x)} y={-Math.max(drag.start.y, drag.cur.y)} width={Math.abs(drag.cur.x - drag.start.x)} height={Math.abs(drag.cur.y - drag.start.y)} fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
           {drag?.kind === 'marquee' && <rect x={Math.min(drag.start.x, drag.cur.x)} y={-Math.max(drag.start.y, drag.cur.y)} width={Math.abs(drag.cur.x - drag.start.x)} height={Math.abs(drag.cur.y - drag.start.y)} fill="var(--accent-softer)" stroke="var(--accent)" strokeWidth={1} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />}
           {blockGhost && (() => {
             const bad = !blockGhost.an.ok || blockGhost.wrongLevel;
@@ -592,12 +669,12 @@ export function PlanView({ levelId }: { levelId: string }) {
           </g>
         ))}
         {tool === 'select' && selWalls.map((w) => (['a', 'b'] as const).map((end) => { const q = toScreen(w[end]); return <circle key={w.id + end} data-handle={`end:${w.id}:${end}`} cx={q.x} cy={q.y} r={5.5} fill="var(--surface)" stroke="var(--accent)" strokeWidth={2} style={{ cursor: 'move' }} />; }))}
-        {tool === 'wall' && chain.length > 0 && cursor && (() => {
+        {(tool === 'wall' || tool === 'linear') && chain.length > 0 && cursor && (() => {
           const from = chain[chain.length - 1], to = snapRes?.p ?? cursor;
           const q = toScreen(mid(from, to));
           return <g style={{ pointerEvents: 'none' }}><rect x={q.x - 38} y={q.y - 26} width={76} height={20} rx={10} fill="var(--ink)" /><text x={q.x} y={q.y - 12} textAnchor="middle" fontSize={11} fill="var(--surface)" fontWeight={600}>{typed || formatLength(dist(from, to), units)}</text></g>;
         })()}
-        {drag?.kind === 'room' && (() => { const q = toScreen(mid(drag.start, drag.cur)); return <text x={q.x} y={q.y} textAnchor="middle" fontSize={11.5} fontWeight={600} fill="var(--accent)">{formatLength(Math.abs(drag.cur.x - drag.start.x), units)} × {formatLength(Math.abs(drag.cur.y - drag.start.y), units)}</text>; })()}
+        {(drag?.kind === 'room' || drag?.kind === 'surface') && (() => { const q = toScreen(mid(drag.start, drag.cur)); return <text x={q.x} y={q.y} textAnchor="middle" fontSize={11.5} fontWeight={600} fill="var(--accent)">{formatLength(Math.abs(drag.cur.x - drag.start.x), units)} × {formatLength(Math.abs(drag.cur.y - drag.start.y), units)}</text>; })()}
         {drag?.kind === 'move' && drag.moved && cursor && (() => { const q = toScreen(cursor); const d = sub(drag.cur, drag.start); return <text x={q.x + 14} y={q.y - 12} fontSize={11} fontWeight={600} fill="var(--accent)">Δ {formatLength(Math.hypot(d.x, d.y), units)}</text>; })()}
         {snapRes && snapRes.kind !== 'none' && snapRes.kind !== 'grid' && (() => { const q = toScreen(snapRes.p); return <g style={{ pointerEvents: 'none' }}><rect x={q.x - 5} y={q.y - 5} width={10} height={10} fill="none" stroke="var(--accent)" strokeWidth={1.6} transform={snapRes.kind === 'midpoint' ? `rotate(45 ${q.x} ${q.y})` : undefined} /><text x={q.x + 9} y={q.y + 16} fontSize={10} fill="var(--accent)">{snapRes.kind}</text></g>; })()}
         {blockGhost && (() => {
@@ -643,6 +720,8 @@ export function PlanView({ levelId }: { levelId: string }) {
       {commentAt && <CommentComposer at={commentAt} onDone={() => setCommentAt(null)} levelId={levelId} dl={dl} />}
       {tool === 'wall' && <div className="hint">{chain.length ? <>Click to continue · type a length <span className="kbd">12'6"</span> + <span className="kbd">↵</span> · <span className="kbd">Esc</span> to finish</> : <>Click to start a wall · snaps to ends, midpoints and alignments · hold <span className="kbd">Space</span> to pan</>}</div>}
       {tool === 'room' && <div className="hint">Drag a rectangle to create a room — walls are added only where none exist</div>}
+      {tool === 'surface' && placeSite && <div className="hint">Drag a rectangle to lay {placeSite.name.toLowerCase()} · <span className="kbd">Esc</span> cancel</div>}
+      {tool === 'linear' && placeSite && <div className="hint">{chain.length ? <>Click the next corner · <span className="kbd">↵</span> or double-click to finish · click the first point to close the loop</> : <>Click along the line of the {placeSite.name.toLowerCase()}</>}</div>}
       {(tool === 'door' || tool === 'window') && <div className="hint">Click a wall to place a {tool} · it swings towards the side you click</div>}
       {tool === 'place' && placeAsset && <div className="hint">Click to place {ASSET_BY_ID[placeAsset]?.name} · <span className="kbd">R</span> rotate · <span className="kbd">Esc</span> done</div>}
       {tool === 'block' && placeBlock && <div className="hint">Move to position · it snaps to nearby walls · click to drop · <span className="kbd">R</span> rotate · <span className="kbd">Esc</span> cancel</div>}

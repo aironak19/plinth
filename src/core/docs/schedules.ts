@@ -15,8 +15,16 @@ import { resolveRules } from '../rules/rulesets';
 import { getMaterial } from '../catalog/materials';
 import { formatArea, formatLength, groupDigits, type UnitSystem } from '../units';
 import { GREY, INK, LW, line, rect, text, textWidth } from './svg';
+import { type LandscapeAnalysis, FEATURE_LABEL, analyzeLandscape, landscapeKeys } from '../derive/landscape';
+import { SUN_LABEL, WATER_LABEL, type Plant, type PlantType } from '../catalog/plants';
 
-export interface TableColumn { key: string; label: string; align?: 'start' | 'middle' | 'end'; /** Fixed width in paper mm (else auto). */ width?: number }
+export interface TableColumn {
+  key: string; label: string; align?: 'start' | 'middle' | 'end';
+  /** Fixed width in paper mm (else auto). */
+  width?: number;
+  /** Set cells in italics (botanical names). */
+  italic?: boolean;
+}
 export type TableRow = Record<string, string>;
 
 // ------------------------------------------------------------- helpers
@@ -175,6 +183,93 @@ export function takeoffSummary(doc: ProjectDoc, b: BuildingModel): TableRow[] {
     .map((e) => ({ category: e.category, item: e.item, qty: groupDigits(e.qty, e.unit === 'nos' ? 0 : e.qty < 10 ? 2 : 1), unit: UNIT_LABEL[e.unit] ?? e.unit }));
 }
 
+// ------------------------------------------------------------ landscape
+
+/** Mature sizes and planting distances read better rounded: "12 m", "450 mm", "39 ft", "18 in". */
+function roughLength(mm: number, u: UnitSystem): string {
+  if (u === 'metric') return mm < 1000 ? `${Math.round(mm / 10) * 10} mm` : `${+(mm / 1000).toFixed(1)} m`;
+  return mm < 900 ? `${Math.round(mm / 25.4)} in` : `${Math.round(mm / 304.8)} ft`;
+}
+
+const PLANT_TYPE: Record<PlantType, string> = {
+  tree: 'Tree', palm: 'Palm', shrub: 'Shrub', bamboo: 'Bamboo', grass: 'Grass', flower: 'Flower', groundcover: 'Ground cover',
+  succulent: 'Succulent', tropical: 'Tropical foliage', climber: 'Climber', aquatic: 'Water plant',
+};
+
+export const PLANTING_COLUMNS: TableColumn[] = [
+  { key: 'key', label: 'Key' }, { key: 'botanical', label: 'Botanical name', italic: true }, { key: 'common', label: 'Common name' }, { key: 'type', label: 'Type' },
+  { key: 'qty', label: 'Qty', align: 'end' }, { key: 'size', label: 'Mature H × S' }, { key: 'spacing', label: 'Spacing', align: 'end' },
+  { key: 'sun', label: 'Sun' }, { key: 'water', label: 'Water' }, { key: 'remarks', label: 'Remarks' },
+];
+
+/**
+ * One row per species: placed plants and hedge plants together, keyed with the
+ * same tags the landscape plan prints beside the planting.
+ */
+export function plantingSchedule(doc: ProjectDoc, b: BuildingModel, la: LandscapeAnalysis = analyzeLandscape(doc, b)): TableRow[] {
+  const u = doc.meta.units;
+  const keys = landscapeKeys(la);
+  const rows = new Map<string, { plant: Plant; qty: number; hedge: number; hedgeRun: number }>();
+  for (const l of la.plants) rows.set(l.plant.id, { plant: l.plant, qty: l.quantity, hedge: 0, hedgeRun: 0 });
+  for (const l of la.linear) {
+    if (!l.species) continue;
+    const e = rows.get(l.species.id) ?? rows.set(l.species.id, { plant: l.species, qty: 0, hedge: 0, hedgeRun: 0 }).get(l.species.id)!;
+    e.hedge += l.plantCount ?? 0;
+    e.hedgeRun += l.length;
+  }
+  return [...rows.values()]
+    .sort((a, c) => a.plant.botanical.localeCompare(c.plant.botanical))
+    .map((e) => {
+      const p = e.plant;
+      const hedge = e.hedge ? `${e.hedge} in ${formatLength(e.hedgeRun * 1000, u)} of hedge. ` : '';
+      return {
+        id: p.id, key: keys.get(p.id) ?? '', botanical: p.botanical, common: p.common, type: PLANT_TYPE[p.type] ?? p.type, qty: String(e.qty + e.hedge),
+        size: `${roughLength(p.height, u)} × ${roughLength(p.spread, u)}`, spacing: roughLength(p.spacing, u),
+        sun: SUN_LABEL[p.sun], water: WATER_LABEL[p.water], remarks: `${hedge}${p.note}`,
+      };
+    });
+}
+
+export const HARDSCAPE_COLUMNS: TableColumn[] = [
+  { key: 'item', label: 'Item' }, { key: 'material', label: 'Material / finish' }, { key: 'qty', label: 'Area / length', align: 'end' },
+];
+
+/** Surfaces, water, copings and linear features — everything in the garden that is built rather than grown. */
+export function hardscapeSchedule(doc: ProjectDoc, b: BuildingModel, la: LandscapeAnalysis = analyzeLandscape(doc, b)): TableRow[] {
+  const u = doc.meta.units;
+  const A = (m2: number) => formatArea(m2 * 1e6, u);
+  const rows: TableRow[] = [];
+  const order = ['paving', 'gravel', 'deck', 'bed', 'pool', 'pond'];
+  for (const sf of [...la.surfaces].sort((a, c) => order.indexOf(a.cls) - order.indexOf(c.cls) || c.area - a.area)) rows.push({ item: FEATURE_LABEL[sf.kind], material: sf.material, qty: A(sf.area) });
+  if (la.areas.lawn > 0.05) rows.push({ item: 'Lawn', material: getMaterial('lawn').name, qty: A(la.areas.lawn) });
+  for (const c of la.coping) rows.push({ item: `${c.kind === 'pool' ? 'Pool' : 'Pond'} coping, ${c.width} mm`, material: c.material, qty: `${formatLength(c.length * 1000, u)} · ${A(c.area)}` });
+  for (const l of la.linear) {
+    rows.push({
+      item: `${l.name}${l.name.toLowerCase().includes(FEATURE_LABEL[l.kind].toLowerCase()) ? '' : ` (${FEATURE_LABEL[l.kind].toLowerCase()})`}, ${formatLength(l.height, u)} high`,
+      material: l.species ? `${l.species.common} — ${l.plantCount} plants` : l.material,
+      qty: formatLength(l.length * 1000, u),
+    });
+  }
+  return rows;
+}
+
+/** Headline garden figures for the schedule sheet. */
+export function landscapeSummary(doc: ProjectDoc, b: BuildingModel, la: LandscapeAnalysis = analyzeLandscape(doc, b)): { label: string; value: string }[] {
+  const u = doc.meta.units;
+  const pct = (v: number) => `${(v * 100).toFixed(0)}%`;
+  const A = (m2: number) => formatArea(m2 * 1e6, u);
+  return [
+    { label: 'Open (unbuilt) area', value: A(la.openArea) },
+    { label: 'Softscape — lawn, beds, ponds', value: `${A(la.softscape)} (${pct(la.softscapePct)} of open area)` },
+    { label: 'Hardscape — paving, gravel, decking', value: `${A(la.hardscape)} (${pct(la.hardscapePct)} of open area)` },
+    { label: 'Permeable ground', value: `${A(la.permeableArea)} (${pct(la.permeablePct)} of plot)` },
+    { label: 'Plants · trees and palms', value: `${groupDigits(la.plantCount)} · ${la.treeCount}` },
+    { label: 'Canopy cover at maturity', value: `${A(la.canopyArea)} (${pct(la.canopyPct)} of plot)` },
+    { label: 'Irrigation demand', value: `${groupDigits(la.irrigation.weekly)} L / week · ${groupDigits(la.irrigation.monthly)} L / month` },
+    { label: 'Outdoor lights', value: String(la.lights) },
+  ];
+}
+
 // --------------------------------------------------------------- table SVG
 
 export interface TableOptions {
@@ -222,7 +317,11 @@ export function tableSvg(columns: TableColumn[], rows: TableRow[], opts: TableOp
   s += line({ x: 0, y }, { x: L.width, y }, LW.heavy);
   rows.forEach((r, ri) => {
     if (ri % 2 === 1) s += rect(0, y, L.width, L.rowH, { fill: GREY.wash });
-    columns.forEach((c, i) => { s += text(cellX(i, c.align), y + L.rowH * 0.68, fit(r[c.key] ?? '', L.widths[i] - padX * 2, fs), { size: fs, anchor: c.align, fill: INK }); });
+    columns.forEach((c, i) => {
+      const cell = text(cellX(i, c.align), y + L.rowH * 0.68, fit(r[c.key] ?? '', L.widths[i] - padX * 2, fs), { size: fs, anchor: c.align, fill: INK });
+      // The shared text helper has no italic switch; a presentation attribute keeps it valid for the PDF converter.
+      s += c.italic ? cell.replace('<text ', '<text font-style="italic" ') : cell;
+    });
     y += L.rowH;
     s += line({ x: 0, y }, { x: L.width, y }, LW.hairline, { stroke: GREY.rule });
   });

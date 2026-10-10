@@ -2,12 +2,12 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { CircleCheck, TriangleAlert, CircleX, Info, Wand, Sparkles, ArrowRight, Loader } from 'lucide-react';
 import { useStore } from '../../state/store';
-import { useBuilding, useDoc, useHealth, useLevels, useUnits } from '../../state/derived';
+import { useBuilding, useDoc, useHealth, useLevels, useSite, useUnits } from '../../state/derived';
 import { HealthRing } from '../components';
 import { computeImpact } from '../../core/ai/impact';
 import { daylightAnalysis, HABITABLE } from '../../core/derive/analysis';
 import { sunPosition, sunriseSunset, CITIES } from '../../core/derive/sun';
-import { formatArea, formatMoneyCompact } from '../../core/units';
+import { formatArea, formatMoneyCompact, groupDigits } from '../../core/units';
 import { METRICS, type MetricId, type SchemeScore } from '../../core/generate/score';
 import { DEFAULT_PROGRAM, type Program, type Scheme } from '../../core/generate/layout';
 import { planThumbnail } from '../plan/thumbnail';
@@ -94,7 +94,28 @@ function HealthCenter() {
             </div>
           ))}
         </div>
+        <LandscapeCard />
       </div>
+    </div>
+  );
+}
+
+/** Garden at a glance — the same figures the L-sheets and the estimate use. */
+function LandscapeCard() {
+  const la = useSite().landscape;
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  return (
+    <div className="card card-pad col" style={{ gap: 10 }}>
+      <h3>Landscape</h3>
+      <div className="grid g2" style={{ gap: 10 }}>
+        <div className="stat"><div className="k">Softscape</div><b className="num">{pct(la.softscapePct)}</b><div className="tiny muted">of open area</div></div>
+        <div className="stat"><div className="k">Permeable ground</div><b className="num">{pct(la.permeablePct)}</b><div className="tiny muted">of plot</div></div>
+        <div className="stat"><div className="k">Canopy cover</div><b className="num">{pct(la.canopyPct)}</b><div className="tiny muted">at maturity</div></div>
+        <div className="stat"><div className="k">Plants · trees</div><b className="num">{groupDigits(la.plantCount)} · {la.treeCount}</b><div className="tiny muted">{la.plants.length} species</div></div>
+        <div className="stat"><div className="k">Water demand</div><b className="num">{groupDigits(la.irrigation.weekly)} L</b><div className="tiny muted">per week</div></div>
+        <div className="stat"><div className="k">Outdoor lights</div><b className="num">{la.lights}</b><div className="tiny muted">fittings</div></div>
+      </div>
+      <div className="tiny muted">Lawn is whatever the house, paving and water leave uncovered. Water demand is a planning figure for mature planting.</div>
     </div>
   );
 }

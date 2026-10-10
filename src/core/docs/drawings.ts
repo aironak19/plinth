@@ -8,16 +8,22 @@
  * uses explicit presentation attributes only, so svg2pdf.js turns it into true
  * vector PDF with selectable text.
  */
-import type { BuildingModel, Id, ProjectDoc, Wall } from '../model/types';
+import type { BuildingModel, FurnitureItem, Id, ProjectDoc, SiteFeature, Wall } from '../model/types';
 import { byLevel, levelAbove, levelBelow, levelsSorted, openingsOf, isDoor } from '../model/query';
 import { deriveLevel, type DerivedLevel } from '../derive/level';
 import { buildSolids, type Solid, type SolidLayer } from '../derive/solids';
 import { computeStair } from '../derive/stairs';
 import { computeRoof } from '../derive/roof';
 import { buildableZone } from '../derive/site';
+import {
+  type LandscapeAnalysis, analyzeLandscape, copingOf, groundFootprint, groundItems, hedgeSpecies, isAreaFeature, isClosedPath, isLinear, isTreeLike,
+  landscapeKeys, surfaceMaterialId,
+} from '../derive/landscape';
+import { linearSpec } from '../derive/solids';
+import type { Plant } from '../catalog/plants';
 import { resolveRules, type RuleSet } from '../rules/rulesets';
 import { getMaterial } from '../catalog/materials';
-import { ASSET_BY_ID } from '../catalog/assets';
+import { ASSET_BY_ID, isOutdoorAsset } from '../catalog/assets';
 import {
   type BBox, type Polygon, type PolygonWithHoles, area, bbox, bboxUnion, centroid, difference, ensureCCW,
   lineClipPolygon, offsetPolygonEdges, pointInPolygon, union,
@@ -335,8 +341,12 @@ function roomLabels(dl: DerivedLevel, f: Frame, units: UnitSystem): string {
 // ------------------------------------------------------------------- site
 
 const FEATURE_FILL: Record<string, string> = {
-  pool: '#d3e6ec', driveway: '#eeece7', parking: '#f1efea', pathway: '#ebe8e1', deck: '#efe5d8', lawn: '#eef2e6', planter: '#e6eedc', tree: '#e6eedc',
+  pool: '#d3e6ec', pond: '#cfe2dc', driveway: '#eeece7', parking: '#f1efea', pathway: '#ebe8e1', patio: '#f0eadd', deck: '#efe5d8',
+  gravel: '#efede6', lawn: '#eef2e6', bed: '#e2ead3', planter: '#e6eedc', tree: '#e6eedc',
 };
+/** Landscape ink: planting is drawn in a muted green so it reads apart from building linework. */
+const PLANT_INK = '#3f5f3a';
+const HEDGE = { edge: '#3f6f3a', body: '#8fb07a' };
 
 /** Plot boundary + features drawn lightly behind a floor plan (in model space). */
 function siteUnderlay(doc: ProjectDoc, f: Frame): string {
@@ -396,23 +406,7 @@ export function drawSitePlan(doc: ProjectDoc, b: BuildingModel, opts: SiteOption
   // Lawn wash inside the plot, then hard features, pool, trees.
   if (plot.length) svg += path(pd([plot]), { fill: '#f3f5ee' });
   const features = Object.values(site.features);
-  for (const ft of features) {
-    if (!ft.polygon) continue;
-    svg += path(pd([ft.polygon]), { fill: FEATURE_FILL[ft.kind] ?? 'none', stroke: ft.kind === 'pool' ? GREY.dark : GREY.soft, width: ft.kind === 'pool' ? LW.medium : LW.light });
-    if (ft.kind === 'pool') svg += path(pd([offsetPolygonEdges(ensureCCW(ft.polygon), ft.polygon.map(() => 300))]), { stroke: GREY.mid, width: LW.hairline });
-    if (ft.kind === 'deck') svg += hatchLines(ft.polygon, f, 600, 0, GREY.rule);
-    if (ft.kind === 'parking') {
-      const n = Math.max(1, Number(ft.props.spaces ?? 1));
-      const fb = bbox(ft.polygon);
-      for (let i = 1; i < n; i++) {
-        const x = fb.minX + ((fb.maxX - fb.minX) * i) / n;
-        svg += line(P({ x, y: fb.minY }), P({ x, y: fb.maxY }), LW.hairline, { stroke: GREY.soft });
-      }
-    }
-    const c = P(centroid(ft.polygon));
-    if (detail) svg += text(c.x, c.y + 0.9, ft.name.toUpperCase(), { size: 2, anchor: 'middle', fill: GREY.dark });
-  }
-
+  svg += siteSurfaces(features, f, detail, detail && 'all');
   // Buildable zone (setbacks) — dashed.
   if (plot.length) {
     const zone = buildableZone(site);
@@ -446,20 +440,18 @@ export function drawSitePlan(doc: ProjectDoc, b: BuildingModel, opts: SiteOption
     }
   }
 
-  // Trees and exterior furniture (cars, loungers) from the ground level.
-  const ground = levelsSorted(b)[0];
-  const outdoorPrims: Prim[] = [];
-  if (ground) for (const it of byLevel(b.furniture, ground.id)) {
-    const asset = ASSET_BY_ID[it.assetId];
-    if (!asset) continue;
-    if (asset.glyph === 'tree') {
-      const r = (it.size?.w ?? asset.size.w) / 2 / s;
-      svg += treeSymbol(P(it.position), r);
-    } else if (asset.category === 'exterior' && !fps.some((p) => pointInPolygon(it.position, p))) outdoorPrims.push(...furnitureSymbol(it));
+  // Hedges, fences and garden walls, then planting and exterior furniture (cars, loungers) standing on the ground.
+  svg += siteLinears(features, f);
+  const outdoorPrims: Prim[] = [], plantPrims: Prim[] = [];
+  for (const { item: it, asset } of groundItems(b)) {
+    const indoors = fps.some((p) => pointInPolygon(it.position, p));
+    // A tree in a courtyard still belongs on the site plan; a pot plant in the living room doesn't.
+    if (asset.plant) { if (!indoors || !asset.plant.potted) plantPrims.push(...furnitureSymbol(it)); }
+    else if (isOutdoorAsset(asset) && !indoors) outdoorPrims.push(...furnitureSymbol(it));
   }
   for (const ft of features) if (ft.kind === 'tree' && ft.position) svg += treeSymbol(P(ft.position), (ft.radius ?? 2000) / s);
-  const op = primsSvg(outdoorPrims, f, GREY.mid);
-  svg += `<g transform="${f.modelTransform}">${op.model}</g>${op.paper}`;
+  const op = primsSvg(outdoorPrims, f, GREY.mid), pp = primsSvg(plantPrims, f, PLANT_INK);
+  svg += `<g transform="${f.modelTransform}">${op.model}${pp.model}</g>${op.paper}${pp.paper}`;
 
   // Plot boundary: thick dash-dot, edge lengths outside, setbacks inside.
   if (plot.length) {
@@ -482,6 +474,242 @@ export function drawSitePlan(doc: ProjectDoc, b: BuildingModel, opts: SiteOption
 
   if (opts.northArrow !== false) svg += northArrow(width - 13, 14, 12, site.northAngle);
   return { svg: `<g>${svg}</g>`, width, height, model: { w: bb.maxX - bb.minX, h: bb.maxY - bb.minY }, pad: { x: padL + padR, y: padT + padB } };
+}
+
+// ------------------------------------------------- landscape (site + L-101)
+
+/** Ground surfaces in paper space: tint per kind plus the hatch or stipple that tells paving, gravel and planting apart. */
+function siteSurfaces(features: SiteFeature[], f: Frame, detail: boolean, labels: 'all' | 'fit' | false): string {
+  const s = f.s;
+  const P = (v: Vec2) => f.p(v);
+  const pd = (rings: Polygon[]) => ringsD(rings.map((r) => r.map(P)));
+  let svg = '';
+  for (const ft of features) {
+    if (!isAreaFeature(ft)) continue;
+    const poly = ft.polygon!;
+    const water = ft.kind === 'pool' || ft.kind === 'pond';
+    svg += path(pd([poly]), { fill: FEATURE_FILL[ft.kind] ?? 'none', stroke: water ? GREY.dark : GREY.soft, width: water ? LW.medium : LW.light });
+    if (ft.kind === 'pool') svg += path(pd([offsetPolygonEdges(ensureCCW(poly), poly.map(() => 300))]), { stroke: GREY.mid, width: LW.hairline });
+    if (water) {
+      // Coping band around the water's edge, as built in 3D.
+      const cp = copingOf(ft);
+      if (cp && detail) svg += path(pd([cp.outer]), { stroke: GREY.mid, width: LW.hairline });
+      if (ft.kind === 'pond' && detail) svg += path(pd([offsetPolygonEdges(ensureCCW(poly), poly.map(() => Math.min(400, 1.2 * s)))]), { stroke: GREY.soft, width: LW.hairline, dash: '1.2 0.8' });
+    }
+    if (detail) {
+      if (ft.kind === 'deck') svg += hatchLines(poly, f, Math.max(600, 1.2 * s), 0, GREY.rule);
+      // Paving joints: a square grid for slabs, a diagonal weave for brick and cobble.
+      if (ft.kind === 'patio') {
+        const weave = /brick|cobble|crazy/.test(surfaceMaterialId(ft));
+        const gap = Math.max(600, 2.4 * s);
+        svg += hatchLines(poly, f, gap, weave ? 45 : 0, GREY.rule) + hatchLines(poly, f, gap, weave ? 135 : 90, GREY.rule);
+      }
+      if (ft.kind === 'gravel') svg += stipple(poly, f, 1.5, GREY.soft, ft.id);
+      if (ft.kind === 'bed' || ft.kind === 'planter') svg += stipple(poly, f, 2.1, '#7f9a66', ft.id);
+    }
+    if (ft.kind === 'parking') {
+      const n = Math.max(1, Number(ft.props.spaces ?? 1));
+      const fb = bbox(poly);
+      for (let i = 1; i < n; i++) {
+        const x = fb.minX + ((fb.maxX - fb.minX) * i) / n;
+        svg += line(P({ x, y: fb.minY }), P({ x, y: fb.maxY }), LW.hairline, { stroke: GREY.soft });
+      }
+    }
+    if (labels) {
+      const c = P(centroid(poly));
+      const lbl = ft.name.toUpperCase();
+      const fb = bbox(poly);
+      const tw = textWidth(lbl, 2), wP = (fb.maxX - fb.minX) / s, hP = (fb.maxY - fb.minY) / s;
+      // A name that won't fit across a narrow strip (side path, border) is turned to run along it.
+      const across = tw <= wP - 1, along = !across && tw <= hP - 1 && wP >= 3;
+      // On the landscape plan a bed is named by its planting tags, and a label that can't fit is left off.
+      if (labels === 'fit' && ((!across && !along) || ft.kind === 'bed' || ft.kind === 'planter')) continue;
+      // Hatched and stippled surfaces get a knock-out behind the name so it stays readable.
+      const patterned = ft.kind === 'patio' || ft.kind === 'gravel' || ft.kind === 'bed' || ft.kind === 'planter' || ft.kind === 'deck';
+      const body = (patterned && (across || along) ? rect2(c.x - tw / 2 - 0.8, c.y - 1.5, tw + 1.6, 3.2) : '')
+        + text(c.x, c.y + 0.9, lbl, { size: 2, anchor: 'middle', fill: GREY.dark });
+      svg += along ? `<g transform="rotate(-90 ${num(c.x)} ${num(c.y)})">${body}</g>` : body;
+    }
+  }
+  return svg;
+}
+
+/** Scattered dots inside a polygon (spacing in paper mm) — deterministic, and capped so a big lawn-sized bed stays light. */
+function stipple(poly: Polygon, f: Frame, spacing: number, color: string, seedKey: string): string {
+  const bb = bbox(poly);
+  const step = Math.max(spacing * f.s, Math.sqrt(area(poly) / 450));
+  let h = 2166136261;
+  for (let i = 0; i < seedKey.length; i++) { h ^= seedKey.charCodeAt(i); h = Math.imul(h, 16777619); }
+  const rnd = () => { h = (Math.imul(h, 1664525) + 1013904223) | 0; return (h >>> 0) / 4294967296; };
+  let d = '';
+  let row = 0;
+  for (let y = bb.minY + step / 2; y < bb.maxY; y += step, row++) {
+    for (let x = bb.minX + (row % 2 ? step : step / 2); x < bb.maxX; x += step) {
+      const p = { x: x + (rnd() - 0.5) * step * 0.6, y: y + (rnd() - 0.5) * step * 0.6 };
+      if (!pointInPolygon(p, poly)) continue;
+      const q = f.p(p);
+      d += `M${num(q.x)} ${num(q.y)}h0.05`;
+    }
+  }
+  // Very short round-capped strokes: one path element draws every dot, in the browser and in the PDF.
+  return d ? `<path d="${d}" fill="none" stroke="${color}" stroke-width="0.24" stroke-linecap="round"/>` : '';
+}
+
+/** Hedges as a thick green band, fences as a thin line with post ticks, garden walls as a double line. */
+function siteLinears(features: SiteFeature[], f: Frame): string {
+  const s = f.s;
+  let svg = '';
+  for (const ft of features) {
+    if (!isLinear(ft)) continue;
+    const closed = isClosedPath(ft.path!);
+    const pts = (closed ? ft.path!.slice(0, -1) : ft.path!).map((p) => f.p(p));
+    const d = ringsD([pts], closed);
+    const { width } = linearSpec(ft);
+    if (ft.kind === 'hedge') {
+      const w = Math.max(1.1, width / s);
+      svg += path(d, { stroke: HEDGE.edge, width: w + 0.3, join: 'round' }) + path(d, { stroke: HEDGE.body, width: w, join: 'round' });
+    } else if (ft.kind === 'wall') {
+      // Two strokes make the double line and keep the corners mitred.
+      const w = Math.max(0.9, width / s);
+      svg += path(d, { stroke: INK, width: w, join: 'miter' }) + path(d, { stroke: '#ffffff', width: Math.max(0.3, w - 2 * LW.light), join: 'miter' });
+    } else {
+      svg += path(d, { stroke: GREY.dark, width: LW.medium, join: 'miter' });
+      const gap = Math.max(2400, 3 * s);
+      const n = closed ? pts.length : pts.length - 1;
+      for (let i = 0; i < n; i++) {
+        const a = ft.path![i], b = ft.path![i + 1] ?? ft.path![0];
+        const len = dist(a, b);
+        if (len < 1) continue;
+        const u = norm(sub(b, a)), v = perp(u);
+        const k = Math.max(1, Math.round(len / gap));
+        for (let j = 0; j <= k; j++) {
+          const c = add(a, scale(u, (len / k) * j));
+          svg += line(f.p(add(c, scale(v, 0.7 * s))), f.p(add(c, scale(v, -0.7 * s))), LW.light, { stroke: GREY.dark });
+        }
+      }
+    }
+  }
+  return svg;
+}
+
+export interface LandscapePlanOptions {
+  scale: number;
+  /** Species key tags beside the planting (default on). */
+  tags?: boolean;
+  /** North arrow in the drawing's top-right corner (default on). */
+  northArrow?: boolean;
+}
+
+/**
+ * Landscape plan (sheet L-101): plot, ground-floor outline, every surface,
+ * hedge, fence and wall, and each plant drawn with its symbol and keyed to the
+ * planting schedule by a short species tag.
+ */
+export function drawLandscapePlan(doc: ProjectDoc, b: BuildingModel, opts: LandscapePlanOptions, la: LandscapeAnalysis = analyzeLandscape(doc, b)): DrawingResult {
+  const s = opts.scale;
+  const site = doc.site;
+  const plot = site.boundary.length >= 3 ? ensureCCW(site.boundary) : [];
+  const features = Object.values(site.features);
+  const footprint = groundFootprint(b);
+  const items = groundItems(b);
+
+  let bb = plot.length ? bbox(plot) : modelBBox(b, doc);
+  const extra = [...footprint.flat(), ...features.flatMap((ft) => ft.polygon ?? ft.path ?? []), ...items.filter((x) => x.asset.plant).map((x) => x.item.position)];
+  if (extra.length) bb = bboxUnion(bb, bbox(extra));
+  const pad = 12, padR = opts.northArrow === false ? pad : 26;
+  const f = new Frame(s, bb.minX - pad * s, bb.maxY + pad * s);
+  const width = (bb.maxX - bb.minX) / s + pad + padR, height = (bb.maxY - bb.minY) / s + 2 * pad;
+  const P = (v: Vec2) => f.p(v);
+  const pd = (rings: Polygon[]) => ringsD(rings.map((r) => r.map(P)));
+  const detail = s < 400;
+  let svg = '';
+
+  if (plot.length) svg += path(pd([plot]), { fill: '#f3f5ee' });
+  svg += siteSurfaces(features, f, detail, detail && 'fit');
+
+  // The house: outline and a light tone only — this sheet is about what surrounds it.
+  if (footprint.length) {
+    const bldg = union(footprint);
+    svg += path(pd(bldg.flatMap((p) => [p.outer, ...p.holes])), { fill: '#e4e2dc', evenodd: true, stroke: INK, width: LW.heavy });
+    const big = bldg.reduce((m, p) => (area(p.outer) > area(m.outer) ? p : m));
+    let c = centroid(big.outer);
+    if (!pointInPolygon(c, big.outer)) c = big.outer[0];
+    if (detail) svg += text(P(c).x, P(c).y + 1, 'HOUSE', { size: 2.6, anchor: 'middle', bold: true, fill: GREY.dark });
+  }
+
+  svg += siteLinears(features, f);
+
+  const outdoorPrims: Prim[] = [], plantPrims: Prim[] = [];
+  const drawn: { item: FurnitureItem; plant: Plant }[] = [];
+  for (const { item, asset } of items) {
+    const indoors = footprint.some((p) => pointInPolygon(item.position, p));
+    if (asset.plant) {
+      if (indoors && asset.plant.potted) continue;
+      plantPrims.push(...furnitureSymbol(item));
+      drawn.push({ item, plant: asset.plant });
+    } else if (isOutdoorAsset(asset) && !indoors) outdoorPrims.push(...furnitureSymbol(item));
+  }
+  for (const ft of features) if (ft.kind === 'tree' && ft.position) svg += treeSymbol(P(ft.position), (ft.radius ?? 2000) / s);
+  const op = primsSvg(outdoorPrims, f, GREY.mid), pp = primsSvg(plantPrims, f, PLANT_INK);
+  svg += `<g transform="${f.modelTransform}">${op.model}${pp.model}</g>${op.paper}${pp.paper}`;
+
+  if (plot.length) svg += path(pd([plot]), { stroke: INK, width: LW.cut, dash: '7 1.2 1 1.2' });
+
+  if (opts.tags !== false) svg += plantTags(drawn, features, landscapeKeys(la), f);
+  if (opts.northArrow !== false) svg += northArrow(width - 12, 14, 12, site.northAngle);
+
+  return { svg: `<g>${svg}</g>`, width, height, model: { w: bb.maxX - bb.minX, h: bb.maxY - bb.minY }, pad: { x: pad + padR, y: 2 * pad } };
+}
+
+/**
+ * Species keys on the plan. Every tree and palm carries its own tag; small
+ * plants are tagged once per group ("IXCO ×12") so a border of forty shrubs
+ * doesn't bury the drawing in text. Hedges are tagged once along their run.
+ */
+function plantTags(drawn: { item: FurnitureItem; plant: Plant }[], features: SiteFeature[], keys: Map<string, string>, f: Frame): string {
+  let svg = '';
+  const size = 1.9;
+  const tag = (x: number, y: number, t: string, anchor: 'start' | 'middle' = 'start') => {
+    const w = textWidth(t, size, true);
+    svg += rect2((anchor === 'middle' ? x - w / 2 : x) - 0.5, y - size * 0.82, w + 1, size * 1.16);
+    svg += text(x, y, t, { size, bold: true, anchor, fill: PLANT_INK });
+  };
+  const radius = (it: FurnitureItem, p: Plant) => (it.size?.w ?? ASSET_BY_ID[it.assetId]?.size.w ?? p.spread) / 2;
+  const bySpecies = new Map<string, { item: FurnitureItem; plant: Plant }[]>();
+  for (const d of drawn) {
+    const key = keys.get(d.plant.id);
+    if (!key) continue;
+    if (isTreeLike(d.plant)) {
+      // Just below the trunk, inside the canopy.
+      const c = f.p(d.item.position);
+      tag(c.x, c.y + Math.min(3.4, Math.max(2.4, (radius(d.item, d.plant) / f.s) * 0.45)), key, 'middle');
+    } else (bySpecies.get(d.plant.id) ?? bySpecies.set(d.plant.id, []).get(d.plant.id)!).push(d);
+  }
+  for (const [id, list] of bySpecies) {
+    const plant = list[0].plant;
+    const reach = Math.max(2000, plant.spread * 1.5, plant.spacing * 2.5);
+    const groups: FurnitureItem[][] = [];
+    for (const { item } of list) {
+      const g = groups.find((grp) => grp.some((o) => dist(o.position, item.position) <= reach));
+      if (g) g.push(item); else groups.push([item]);
+    }
+    for (const g of groups) {
+      const cx = g.reduce((t, o) => t + o.position.x, 0) / g.length, cy = g.reduce((t, o) => t + o.position.y, 0) / g.length;
+      const rep = g.reduce((m, o) => (dist(o.position, { x: cx, y: cy }) < dist(m.position, { x: cx, y: cy }) ? o : m));
+      const c = f.p(rep.position);
+      tag(c.x + radius(rep, plant) / f.s + 0.9, c.y + size * 0.35, g.length > 1 ? `${keys.get(id)} ×${g.length}` : keys.get(id)!);
+    }
+  }
+  for (const ft of features) {
+    if (ft.kind !== 'hedge' || !isLinear(ft)) continue;
+    const key = keys.get(hedgeSpecies(ft).id);
+    if (!key) continue;
+    let best = { a: ft.path![0], b: ft.path![1], len: 0 };
+    for (let i = 0; i + 1 < ft.path!.length; i++) { const len = dist(ft.path![i], ft.path![i + 1]); if (len > best.len) best = { a: ft.path![i], b: ft.path![i + 1], len }; }
+    const c = f.p(mid(best.a, best.b));
+    tag(c.x, c.y + size * 0.35, `${key} HEDGE`, 'middle');
+  }
+  return svg;
 }
 
 const rect2 = (x: number, y: number, w: number, h: number) =>

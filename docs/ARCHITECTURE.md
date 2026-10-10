@@ -48,6 +48,22 @@ All lengths are millimetres. Plan space is x → east, y → north; 3D adds z up
 - **Design:** `PlanView` (SVG, screen-constant strokes, live drag preview by applying the pending op to a scratch doc), `Viewport3D` (three.js; rebuilds on model change, highlights selection without rebuilding), `Inspector` (progressive disclosure), `AIPanel`.
 - **Spaces:** site, docs, cost, analysis (generative design in a Web Worker), collaboration, versions, library, settings; admin and presentation.
 
+## Landscape (`src/core/catalog/plants.ts`, `src/core/generate/landscape.ts`, `src/core/derive/landscape.ts`)
+
+Landscape is not a separate module bolted on; it uses the same three ideas as the building.
+
+- **One model.** Surfaces (lawn, beds, paving, decks, gravel, pools, ponds) are `SiteFeature` polygons; hedges, fences and garden walls are `SiteFeature` paths; plants and garden objects are ordinary placed assets. A plant asset carries its `Plant` record (botanical name, mature size, sun, water, climate, spacing), and that record alone drives its plan symbol, its 3D model, the planting schedule and its cost.
+- **Operations.** "Design my garden" (`planLandscape`) is a pure function from the document to a list of the same operations the mouse issues (`site.feature.create`, `block.place`, `furniture.create`). It reads the plot, road, footprint and front door, filters each style's palette to the project's climate, and tags what it creates so a re-run replaces only its own work.
+- **Derivation.** `analyzeLandscape` computes softscape / hardscape, permeable ground, canopy cover, irrigation demand and plant counts; quantities, cost, the L-series sheets and the landscape health rules all read from it.
+
+## Rendering (`src/ui/three`)
+
+- `environment.ts` — a physical sky driven by the real sun position. The sky is baked (without the sun disc) into the image-based lighting environment whenever the time or weather changes, so ambient colour, fog and exposure follow the hour. A twilight dome and stars fade in below the horizon; `setNight` switches window glow and lamps.
+- `textures.ts` — every pattern paints an albedo canvas and a height field; the normal map is derived from the height field. No texture downloads.
+- `vegetation.ts` — each growth form is a skeleton of tubes, leafy puffs, arching strips and cards, rendered as alpha-tested leaf cards (realistic) or solids (architectural, clay, sketch). Geometry is cached per species, variant and season.
+- `post.ts` — MSAA render target → GTAO → bloom → tone mapping. Leaf cards are left out of the occlusion pre-pass.
+- Photoreal mode hands the same scene to `three-gpu-pathtracer` (loaded on demand), with the sky supplied as a cube map and an edge-preserving denoise on the way to the screen.
+
 ## Performance
 
 - Immutable model with structural sharing, plus per-level memoisation keyed on object identity.

@@ -4,6 +4,7 @@
  * rear (96 ft deep overall, ≈ 4,522 sq ft), taken from the hand sketch in
  * `Aura Villa/`. The road is assumed on the 52 ft edge (south); edit in Site.
  */
+import { ASSET_BY_ID } from '../catalog/assets';
 import type { ProjectDoc } from '../model/types';
 import { defaultMeta, newProjectDoc } from '../model/factory';
 import { buildFromSpec, type RoomSpec } from './fromRects';
@@ -125,9 +126,31 @@ export function auraVilla(): ProjectDoc {
   };
   add('car-suv', 30.5, 10.8, 0, 'white');
   add('car-sedan', 40.5, 10.8, 0, 'black');
-  for (const [x, y, a] of [[3, 80, 'tree'], [3, 92, 'palm'], [38, 92, 'tree'], [19.5, 92, 'palm'], [3, 6, 'palm'], [18, 8, 'tree'], [49, 40, 'shrub'], [39, 70, 'palm']] as const) add(a, x, y);
-  add('lounger', 16, 90, 0); add('lounger', 20, 90, 0); add('lounger', 24, 90, 0);
+  // ---- landscape: a tropical garden specified with real species
+  const P = (id: string, x: number, y: number, k = 1) => {
+    const fid = uid('f'), a = ASSET_BY_ID[`plant-${id}`];
+    building.furniture[fid] = { id: fid, levelId: ground.id, assetId: a.id, position: { x: ft(x), y: ft(y) }, rotation: 0, props: {}, ...(k !== 1 ? { size: { w: a.size.w * k, d: a.size.d * k, h: a.size.h * k } } : {}) };
+  };
+  // Compound wall on the three private sides; the road front stays open to the gate, path and drive.
+  f('sf-wall', { id: 'sf-wall', kind: 'wall', name: 'Compound wall', path: [{ x: ft(52) - 130, y: 130 }, { x: ft(52) - 130, y: ft(49) - 130 }, { x: ft(42) - 130, y: ft(49) - 130 }, { x: ft(42) - 130, y: ft(96) - 130 }, { x: 130, y: ft(96) - 130 }, { x: 130, y: 130 }], materialId: 'ext-texture', props: { height: 1650, width: 200 } });
+  f('sf-hedge', { id: 'sf-hedge', kind: 'hedge', name: 'Front hedge', path: [{ x: ft(13.2), y: ft(1) }, { x: ft(24.2), y: ft(1) }], props: { height: 900, width: 600, species: 'murraya' } });
+  f('sf-bed-front', { id: 'sf-bed-front', kind: 'bed', name: 'Entrance planting', polygon: rect(13, 2.4, 11.4, 4.2), materialId: 'mulch', props: {} });
+  f('sf-bed-pool', { id: 'sf-bed-pool', kind: 'bed', name: 'Poolside planting', polygon: rect(1, 87.4, 8, 7.6), materialId: 'mulch', props: {} });
+  f('sf-bed-rear', { id: 'sf-bed-rear', kind: 'bed', name: 'Rear border', polygon: rect(10, 92.4, 30.5, 2.8), materialId: 'mulch', props: {} });
+  add('gate-pedestrian', 9.75, 0.7, 0, 'teak');
+  // Trees and palms
+  P('frangipani', 18.5, 9.5, 0.9); P('foxtail', 3.2, 6); P('foxtail', 3.2, 30, 0.9);
+  P('areca', 4.6, 90.4); P('foxtail', 2.6, 93.6, 0.85); P('heliconia', 5.2, 93.2); P('alocasia', 2.6, 88.8); P('fern', 6.8, 88.6); P('spider-lily', 8, 91);
+  P('crepe-myrtle', 39, 60); P('pygmy-date', 39.2, 71); P('frangipani', 3.4, 79.5, 0.85);
+  for (const x of [12, 17, 22, 27, 32, 37.5]) P(x % 2 > 0.6 ? 'heliconia' : 'giant-strelitzia', x, 93.8, x % 2 > 0.6 ? 1 : 0.6);
+  for (const x of [14, 17.4, 20.8]) P('ixora', x, 5.3);
+  P('bird-of-paradise', 23, 4.2); P('spider-lily', 15.6, 3.4); P('spider-lily', 19.2, 3.3);
+  P('hibiscus', 49, 40); P('areca', 49.6, 24, 0.8); P('ashoka', 50, 31, 0.8); P('ashoka', 50, 36.5, 0.8);
+  // Pool terrace and lights
+  add('lounger-pair', 20, 90.2, 0); add('parasol', 27.5, 89.6, 0, 'ivory');
   add('outdoor-dining', 30, 69.5, 90);
+  for (const y of [4, 10, 16]) { add('path-light', 6.4, y); add('path-light', 13.1, y + 3); }
+  add('uplight', 19.6, 10.4); add('uplight', 4.2, 80.4); add('bollard-light', 9, 73.5); add('bollard-light', 37, 73.5);
 
   // Collaboration history — what a live project looks like.
   const now = Date.now();

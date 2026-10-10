@@ -6,6 +6,7 @@
 import type { Door, FurnitureItem, Wall, Window, Column } from '../model/types';
 import type { StairInfo } from '../derive/stairs';
 import { ASSET_BY_ID, assetColors, type Asset } from '../catalog/assets';
+import type { Plant } from '../catalog/plants';
 import { type Vec2, add, norm, perp, rotate, scale, sub } from '../geometry/vec';
 
 export type Weight = 'cut' | 'heavy' | 'medium' | 'light' | 'hairline';
@@ -121,13 +122,16 @@ export function furnitureSymbol(item: FurnitureItem): Prim[] {
   const sx = item.size ? item.size.w / asset.size.w : 1, sy = item.size ? item.size.d / asset.size.d : 1;
   const rot = (item.rotation * Math.PI) / 180;
   const xf = (p: Vec2) => add(rotate({ x: p.x * sx, y: p.y * sy }, rot), item.position);
+  if (asset.plant) return plantSymbol(asset.plant, item.position, ((item.size?.w ?? asset.size.w) / 2), item.id);
   const colors = assetColors(asset, item.variant);
   const parts = [...asset.parts].sort((a, b) => a.z + a.h - (b.z + b.h));
   const out: Prim[] = [];
   for (const p of parts) {
     if (p.h <= 12 && asset.category !== 'living') continue;
-    const fill = p.slot === 'leaf' ? colors.leaf : undefined;
-    if (p.shape === 'box') {
+    const fill = p.slot === 'leaf' ? colors.leaf : p.slot === 'water' ? '#5fb4c9' : undefined;
+    if (p.shape === 'sphere' && Math.abs(p.w - p.d) > 40) {
+      out.push({ t: 'poly', pts: Array.from({ length: 20 }, (_, i) => xf({ x: p.x + Math.cos((i / 20) * Math.PI * 2) * p.w / 2, y: p.y + Math.sin((i / 20) * Math.PI * 2) * p.d / 2 })), closed: true, w: 'hairline', dash: p.overhead && p.slot !== 'leaf', fill });
+    } else if (p.shape === 'box' || p.shape === 'pyramid') {
       const hx = p.w / 2, hy = p.d / 2;
       out.push({ t: 'poly', pts: [{ x: p.x - hx, y: p.y - hy }, { x: p.x + hx, y: p.y - hy }, { x: p.x + hx, y: p.y + hy }, { x: p.x - hx, y: p.y + hy }].map(xf), closed: true, w: 'hairline', dash: p.overhead, fill: asset.id === 'rug' ? colors.accent : undefined });
     } else {
@@ -180,3 +184,81 @@ export function primPath(p: Prim): string {
 }
 
 const round = (v: number) => Math.round(v * 10) / 10;
+
+function seeded(key: string) {
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619); }
+  let t = (h >>> 0) || 1;
+  return () => { t ^= t << 13; t >>>= 0; t ^= t >> 17; t ^= t << 5; t >>>= 0; return t / 4294967296; };
+}
+
+/**
+ * Landscape-plan plant symbols, drawn the way a planting plan is read: a
+ * scalloped canopy with its trunk for trees, a star of fronds for palms, a
+ * cloud for shrubs, a spiky tuft for grasses and rosettes. `r` is the canopy
+ * radius in mm; the outline is tinted with the plant's foliage colour.
+ */
+export function plantSymbol(plant: Plant, c: Vec2, r: number, seedKey = plant.id): Prim[] {
+  const rnd = seeded(seedKey);
+  const rot = rnd() * Math.PI * 2;
+  const at = (a: number, k: number): Vec2 => ({ x: c.x + Math.cos(a + rot) * r * k, y: c.y + Math.sin(a + rot) * r * k });
+  const out: Prim[] = [];
+  const fill = plant.foliage;
+  const scallop = (lobes: number, depth: number, k = 1): Vec2[] => Array.from({ length: lobes * 6 }, (_, i) => { const a = (i / (lobes * 6)) * Math.PI * 2; return at(a, k * (1 - depth + depth * Math.abs(Math.sin((a * lobes) / 2)))); });
+  const trunk = () => out.push({ t: 'circle', c, r: Math.max(60, Math.min(260, r * 0.07)), w: 'light', fill: 'cut' });
+  switch (plant.form) {
+    case 'canopy': case 'umbrella': case 'weeping': {
+      out.push({ t: 'poly', pts: scallop(plant.form === 'umbrella' ? 13 : 10, 0.1), closed: true, w: 'light', fill });
+      const n = 5 + Math.floor(rnd() * 3);
+      for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2 + rnd() * 0.5; out.push({ t: 'line', a: at(a, 0.08), b: at(a, 0.5 + rnd() * 0.25), w: 'hairline' }); }
+      trunk();
+      break;
+    }
+    case 'columnar': case 'conifer': {
+      const spikes = plant.form === 'conifer' ? 12 : 0;
+      out.push(spikes ? { t: 'poly', pts: Array.from({ length: spikes * 2 }, (_, i) => at((i / (spikes * 2)) * Math.PI * 2, i % 2 ? 0.72 : 1)), closed: true, w: 'light', fill } : { t: 'circle', c, r, w: 'light', fill });
+      out.push({ t: 'circle', c, r: r * 0.5, w: 'hairline' });
+      trunk();
+      break;
+    }
+    case 'palm': case 'fanpalm': case 'clumppalm': {
+      const n = plant.form === 'fanpalm' ? 12 : 9;
+      out.push({ t: 'circle', c, r, w: 'hairline', dash: true, fill });
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        out.push({ t: 'line', a: c, b: at(a, 0.96), w: 'light' });
+        if (plant.form !== 'fanpalm') for (const t of [0.45, 0.7]) for (const s of [-1, 1]) out.push({ t: 'line', a: at(a, t), b: at(a + s * 0.16, t + 0.2), w: 'hairline' });
+      }
+      trunk();
+      break;
+    }
+    case 'bamboo': {
+      out.push({ t: 'circle', c, r, w: 'hairline', dash: true, fill });
+      for (let i = 0; i < 7; i++) { const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()) * 0.6; out.push({ t: 'circle', c: at(a, d), r: Math.max(40, r * 0.09), w: 'light' }); }
+      break;
+    }
+    case 'shrub': case 'climber': case 'flower': case 'topiary': {
+      out.push(plant.form === 'topiary' ? { t: 'circle', c, r, w: 'light', fill } : { t: 'poly', pts: scallop(7, 0.16), closed: true, w: 'light', fill });
+      if (plant.flower) out.push({ t: 'circle', c, r: r * 0.24, w: 'hairline', fill: plant.flower.color });
+      else out.push({ t: 'line', a: at(0, 0.3), b: at(Math.PI, 0.3), w: 'hairline' }, { t: 'line', a: at(Math.PI / 2, 0.3), b: at(-Math.PI / 2, 0.3), w: 'hairline' });
+      break;
+    }
+    case 'grass': case 'rosette': case 'paddle': {
+      const n = plant.form === 'paddle' ? 7 : 12;
+      out.push({ t: 'circle', c, r, w: 'hairline', dash: true, fill });
+      for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2; out.push({ t: 'line', a: at(a, 0.1), b: at(a, i % 2 ? 0.7 : 0.98), w: plant.form === 'paddle' ? 'light' : 'hairline' }); }
+      break;
+    }
+    case 'groundcover': {
+      out.push({ t: 'circle', c, r, w: 'hairline', dash: true, fill });
+      for (let i = 0; i < 6; i++) { const a = rnd() * Math.PI * 2; out.push({ t: 'circle', c: at(a, Math.sqrt(rnd()) * 0.7), r: Math.max(20, r * 0.07), w: 'hairline' }); }
+      break;
+    }
+    case 'aquatic': {
+      for (let i = 0; i < 5; i++) { const a = (i / 5) * Math.PI * 2; out.push({ t: 'circle', c: at(a, 0.55), r: r * 0.3, w: 'hairline', fill }); }
+      if (plant.flower) out.push({ t: 'circle', c, r: r * 0.2, w: 'hairline', fill: plant.flower.color });
+      break;
+    }
+  }
+  return out;
+}

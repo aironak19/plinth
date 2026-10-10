@@ -11,6 +11,7 @@ import {
 import { type Vec2, dist, mid, norm, perp, projectToSegment, segmentIntersection, sub } from '../geometry/vec';
 import { levelsSorted } from '../model/query';
 import { deriveLevel } from './level';
+import { analyzeLandscape, type LandscapeAnalysis } from './landscape';
 
 export interface SetbackCheck {
   edge: number;
@@ -42,6 +43,8 @@ export interface SiteAnalysis {
   floors: number;
   parkingProvided: number;
   edgeLengths: number[];
+  /** Garden numbers: soft / hard areas, permeability, planting, canopy, irrigation. */
+  landscape: LandscapeAnalysis;
 }
 
 export function buildableZone(site: Site): PolygonWithHoles[] {
@@ -121,5 +124,6 @@ export function analyzeSite(doc: ProjectDoc, building: BuildingModel, rules: Rul
     footprint, footprintArea, coverage: plotArea ? footprintArea / plotArea : 0, builtUpArea,
     far: plotArea ? builtUpArea / plotArea : 0, openArea: plotArea - footprintArea,
     violations, setbacks, buildingHeight, floors: levels.filter((l) => l.elevation >= 0).length, parkingProvided, edgeLengths,
+    landscape: analyzeLandscape(doc, building),
   };
 }

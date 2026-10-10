@@ -23,6 +23,9 @@ import { generateSchemes, DEFAULT_PROGRAM, type Program, type Scheme, siteFromPr
 import { dist, sub } from '../geometry/vec';
 import { searchBlocks } from '../catalog/blocks';
 import { findAttachPosition, findSitePosition } from '../ops/blocks';
+import { planLandscape, climateOf } from '../generate/landscape';
+import { PLANTS, LANDSCAPE_STYLES, plantAssetId, type LandscapeStyle, type Plant } from '../catalog/plants';
+import { ensureCCW, offsetPolygonEdges, pointInPolygon, distToPolygonEdge } from '../geometry/polygon';
 import { layoutBlock, analyzeBlock } from '../generate/blocks';
 import { buildableRect } from '../generate/layout';
 
@@ -274,6 +277,10 @@ export function interpret(input: string, doc: ProjectDoc, selection: ElementRef[
     return { kind: 'change', title: 'Add level', message: `Add ${names[n] ?? `Level ${n}`} on top, copying the exterior walls of ${top.name}. The roof moves up automatically.`, ops: [{ type: 'level.create', params: { name: names[n] ?? `Level ${n}`, copyExteriorFrom: top.id } }] };
   }
 
+  // ---- landscape: whole-plot design, planting along a boundary, hedges and walls
+  const land = landscapeIntent(t, c);
+  if (land) return land;
+
   // ---- ready-made blocks: "add a master suite next to the landing", "add a 3bhk home"
   const blk = t.match(/\badd (?:a |an |another |one )?(.+?)(?:\s+(?:next to|near|beside|off|adjoining|attached to|connected to|to)\s+(?:the )?(.+))?$/);
   if (blk) {
@@ -296,7 +303,10 @@ export function interpret(input: string, doc: ProjectDoc, selection: ElementRef[
         const sz = def.sizes.find((x) => x.id === sizeId)!;
         const hostRoom = host?.tagId ? deriveLevel(b, host.levelId).rooms.find((r) => r.tagId === host.tagId) : undefined;
         const near = hostRoom ? hostRoom.polygon.reduce((a, p) => ({ x: a.x + p.x / hostRoom.polygon.length, y: a.y + p.y / hostRoom.polygon.length }), { x: 0, y: 0 }) : undefined;
-        const pos = ground ? findSitePosition(doc, b, def.id, sizeId, near) : null;
+        // Parking wants the road; patios, sit-outs and gardens want the quiet side, by the living room.
+        const garden = def.category === 'outdoor' || def.category === 'garden';
+        const living = garden && !near && ground ? deriveLevel(b, ground.id).rooms.find((r) => r.fn === 'living' || r.fn === 'family') : undefined;
+        const pos = ground ? findSitePosition(doc, b, def.id, sizeId, near ?? living?.labelPoint, garden ? { roadWeight: -0.4, step: 915 } : {}) : null;
         if (!pos) return { kind: 'answer', title: 'No free space on the plot', message: `There isn’t a clear ${L(ft(sz.w))} × ${L(ft(sz.d))} patch on the plot for ${def.name.toLowerCase()} (${sz.label.toLowerCase()}). Try a smaller size, or move the building.` };
         return { kind: 'change', title: `Add ${def.name.toLowerCase()}`, message: `Add ${def.name.toLowerCase()} — ${sz.label.toLowerCase()}, ${L(ft(sz.w))} × ${L(ft(sz.d))} — on the site${near ? ` near ${host!.name}` : ' close to the road'}, clear of the building.${def.category === 'parking' ? ' It counts towards required parking.' : ''}`, ops: [{ type: 'block.place', params: { blockId: def.id, size: sizeId, levelId: ground!.id, ...pos } }] };
       }
@@ -381,6 +391,8 @@ export function parseProgram(t: string): Program {
 }
 
 export const SUGGESTIONS = [
+  'Landscape the plot in tropical style',
+  'Add a pergola sit-out',
   'Make the master bedroom 2 ft wider',
   'Add a powder room near the living room',
   'How much floor area is currently used?',
@@ -395,3 +407,83 @@ export const SUGGESTIONS = [
 ];
 
 export { getMaterial };
+
+const STYLE_WORDS: [RegExp, LandscapeStyle][] = [[/tropical|resort|bali|goa/, 'tropical'], [/modern|minimal|contemporary/, 'modern'], [/indian|vastu|traditional|courtyard/, 'indian'], [/mediterranean|tuscan|spanish/, 'mediterranean'], [/zen|japanese/, 'zen'], [/cottage|english|country/, 'cottage']];
+const NUM: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, dozen: 12 };
+
+function findPlant(t: string): Plant | null {
+  const words = t.replace(/\b(trees?|plants?|palms?)\b/g, (m) => m.replace(/s$/, ''));
+  let best: Plant | null = null, score = 0;
+  for (const p of PLANTS) {
+    const names = [p.common.toLowerCase(), p.id.replace(/-/g, ' '), ...p.common.toLowerCase().replace(/[()]/g, '').split(/\s+/).filter((w) => w.length > 3 && !/tree|palm|plant|grass|giant|golden/.test(w))];
+    for (const n of names) if (words.includes(n) && n.length > score) { best = p; score = n.length; }
+  }
+  if (best) return best;
+  if (/\bpalms?\b/.test(t)) return PLANTS.find((p) => p.id === 'foxtail')!;
+  if (/\bshade trees?\b|\btrees?\b/.test(t)) return PLANTS.find((p) => p.id === 'neem')!;
+  if (/\bshrubs?\b|\bbush(es)?\b/.test(t)) return PLANTS.find((p) => p.id === 'hibiscus')!;
+  return null;
+}
+
+/** Garden requests: design the whole plot, plant a row, or enclose the boundary. */
+function landscapeIntent(t: string, c: Ctx): Proposal | null {
+  const { doc, b } = c;
+  const ground = levelsSorted(b)[0];
+  if (!ground) return null;
+  const plot = ensureCCW(doc.site.boundary);
+
+  if (/\b(landscap\w*|design (the |my |a )?garden|garden design|do the garden|plan (the |my )?garden)\b/.test(t) && !/\badd (a |an )?(lawn|garden lawn)\b/.test(t)) {
+    const style = STYLE_WORDS.find(([re]) => re.test(t))?.[1] ?? (Math.abs(doc.meta.location.lat) < 26 ? 'tropical' : 'modern');
+    const plan = planLandscape(doc, style);
+    const label = LANDSCAPE_STYLES.find((x) => x.id === style)!.label;
+    if (plan.ops.length < 2) return { kind: 'answer', title: 'Not enough open ground', message: plan.notes[0] ?? 'There isn’t enough clear space around the house to lay out a garden yet.' };
+    return { kind: 'change', title: `${label} garden`, message: `Lay out the whole plot as a ${label.toLowerCase()} garden for a ${climateOf(doc)} climate: ${plan.notes.join('; ').toLowerCase()}. Every item stays editable, and asking again replaces only what I generated.`, ops: plan.ops, suggestions: LANDSCAPE_STYLES.filter((x) => x.id !== style).slice(0, 3).map((x) => `Landscape the plot in ${x.label.toLowerCase()} style`) };
+  }
+
+  const enclose = t.match(/\b(hedge|fence|compound wall|boundary wall|garden wall|wall)\b.*\b(around|along|on) (the |my )?(plot|boundary|site|perimeter|compound|property)\b/);
+  if (enclose && /\b(add|put|build|plant|make|create)\b/.test(t)) {
+    const kind = enclose[1] === 'hedge' ? 'hedge' : enclose[1] === 'fence' ? 'fence' : 'wall';
+    const width = kind === 'hedge' ? 600 : kind === 'fence' ? 50 : 200, height = kind === 'hedge' ? 1200 : kind === 'fence' ? 1500 : 1650;
+    const inset = offsetPolygonEdges(plot, plot.map(() => width / 2 + 60));
+    if (inset.length !== plot.length) return null;
+    const name = kind === 'hedge' ? 'Boundary hedge' : kind === 'fence' ? 'Boundary fence' : 'Compound wall';
+    return { kind: 'change', title: `Add ${name.toLowerCase()}`, message: `Run a ${(height / 1000).toFixed(1)} m ${kind === 'wall' ? 'rendered compound wall with a stone coping' : kind === 'hedge' ? 'clipped kamini hedge' : 'timber fence'} around the whole plot, just inside the boundary. Add a gate from Garden objects, or use “Design my garden” for a wall with the gate already placed.`, ops: [{ type: 'site.feature.create', params: { kind, name, path: [...inset, inset[0]], materialId: kind === 'wall' ? 'ext-texture' : kind === 'fence' ? 'wood-cladding' : undefined, props: { height, width, ...(kind === 'hedge' ? { species: 'murraya' } : {}) } } }] };
+  }
+
+  const m = t.match(/\b(?:plant|add|put)\s+(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|dozen)?\s*(?:more\s+)?(.+)$/);
+  if (m && /\b(plant|tree|palm|shrub|bush|bamboo|hedge plants?)\b|\balong\b/.test(t)) {
+    const sp = findPlant(m[2]);
+    if (!sp) return null;
+    const count = Math.max(1, Math.min(40, m[1] ? NUM[m[1]] ?? Number(m[1]) : 1));
+    const bbx = plot.reduce((a, p) => ({ minX: Math.min(a.minX, p.x), maxX: Math.max(a.maxX, p.x), minY: Math.min(a.minY, p.y), maxY: Math.max(a.maxY, p.y) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+    const edges = plot.map((p, i) => { const q = plot[(i + 1) % plot.length]; const len = Math.hypot(q.x - p.x, q.y - p.y); return { p, q, len, d: { x: (q.x - p.x) / len, y: (q.y - p.y) / len }, mid: { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }, site: doc.site.edges[i] }; });
+    const pick = (score: (e: (typeof edges)[number]) => number) => [...edges].sort((x, y) => score(y) - score(x))[0];
+    const side = /\bnorth\b|\bback\b|\brear\b/.test(t) ? pick((e) => (/north/.test(t) ? e.mid.y : e.site?.kind === 'rear' ? 1e9 : e.mid.y)) : /\bsouth\b/.test(t) ? pick((e) => -e.mid.y) : /\beast\b|\bright\b/.test(t) ? pick((e) => e.mid.x) : /\bwest\b|\bleft\b/.test(t) ? pick((e) => -e.mid.x) : /\bfront\b|\broad\b|\bstreet\b/.test(t) ? pick((e) => (e.site?.road ? 1e9 : e.site?.kind === 'front' ? 1e8 : -e.mid.y)) : null;
+    const fp = deriveLevel(b, ground.id).footprint;
+    const taken = Object.values(b.furniture).filter((f) => f.levelId === ground.id).map((f) => f.position);
+    // Palms and columnar trees have slim trunks and can stand close to a wall; spreading trees need room.
+    const slim = sp.type === 'palm' || sp.form === 'columnar' || sp.type === 'bamboo';
+    const clearance = slim ? 1400 : Math.min(3000, sp.spread * 0.35 + 800);
+    const free = (p: { x: number; y: number }) => pointInPolygon(p, plot) && distToPolygonEdge(p, plot) > 400 && fp.every((f) => !pointInPolygon(p, f) && distToPolygonEdge(p, f) > clearance) && !Object.values(doc.site.features).some((f) => f.polygon && f.kind !== 'lawn' && f.kind !== 'bed' && pointInPolygon(p, f.polygon)) && taken.every((q) => Math.hypot(q.x - p.x, q.y - p.y) > Math.min(sp.spacing, sp.spread) * 0.6);
+    const spots: { x: number; y: number }[] = [];
+    const along = (e: (typeof edges)[number], n: number) => {
+      const inw = { x: -e.d.y, y: e.d.x }, off = slim ? Math.max(1200, Math.min(1900, sp.spread * 0.4)) : Math.max(1200, sp.spread * 0.45 + 500);
+      for (let k = 0; k < n * 3 && spots.length < count; k++) {
+        const tt = (e.len / (n + 1)) * ((k % n) + 1) + Math.floor(k / n) * (e.len / (n + 1) / 3);
+        const p = { x: e.p.x + e.d.x * tt + inw.x * off, y: e.p.y + e.d.y * tt + inw.y * off };
+        if (free(p)) { spots.push(p); taken.push(p); }
+      }
+    };
+    if (side) along(side, count);
+    else for (const e of [...edges].sort((x, y) => (x.site?.road ? 1 : 0) - (y.site?.road ? 1 : 0) || y.len - x.len)) { if (spots.length >= count) break; along(e, Math.max(1, Math.min(count - spots.length, Math.floor(e.len / Math.max(1500, sp.spacing))))); }
+    void bbx;
+    if (!spots.length) return { kind: 'answer', title: 'No room to plant there', message: `I couldn’t find a clear spot for ${sp.common.toLowerCase()} ${side ? 'along that boundary' : 'on the plot'} — it needs about ${(sp.spread / 1000).toFixed(1)} m of spread and to stand clear of the house.` };
+    const unsuited = !sp.climates.includes(climateOf(doc));
+    return {
+      kind: 'change', title: `Plant ${spots.length} ${sp.common.toLowerCase()}`,
+      message: `Plant ${spots.length === count ? spots.length : `${spots.length} of the ${count}`} ${sp.common} (${sp.botanical})${side ? ' along that boundary' : ' around the plot'}, clear of the house. Grows to about ${(sp.height / 1000).toFixed(0)} m tall and ${(sp.spread / 1000).toFixed(1)} m wide. ${sp.note}${unsuited ? ` Note: it is not well suited to a ${climateOf(doc)} climate.` : ''}`,
+      ops: spots.map((p) => ({ type: 'furniture.create', params: { levelId: ground.id, assetId: plantAssetId(sp.id), position: p } })),
+    };
+  }
+  return null;
+}

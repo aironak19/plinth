@@ -41,7 +41,7 @@ export function useHealth() {
   const doc = useDoc();
   const b = useBuilding();
   const rules = useRules();
-  return useMemo(() => validate(doc, b, rules), [b, doc.site, doc.meta.units, rules]);
+  return useMemo(() => validate(doc, b, rules), [b, doc.site, doc.meta.units, doc.meta.location, rules]);
 }
 
 export function useCost() {

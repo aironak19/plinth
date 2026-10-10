@@ -51,7 +51,18 @@ export function hitTest(doc: ProjectDoc, b: BuildingModel, dl: DerivedLevel, p: 
   }
   if (best) return { kind: 'wall', id: best.id };
   for (const r of dl.rooms) if (r.tagId && pointInPolygon(p, r.polygon)) return { kind: 'room', id: r.tagId };
-  if (opts.site) for (const f of Object.values(doc.site.features)) if (f.polygon && pointInPolygon(p, f.polygon)) return { kind: 'siteFeature', id: f.id };
+  if (opts.site) {
+    // Hedges, fences and garden walls first — they are thin and sit on top of the surfaces.
+    for (const f of Object.values(doc.site.features)) {
+      if (!f.path || f.path.length < 2) continue;
+      const half = Number(f.props.width ?? (f.kind === 'hedge' ? 600 : 200)) / 2 + tol;
+      for (let i = 0; i + 1 < f.path.length; i++) if (projectToSegment(p, f.path[i], f.path[i + 1]).dist <= half) return { kind: 'siteFeature', id: f.id };
+    }
+    // Smallest surface under the cursor wins, so a bed inside a lawn can be picked.
+    let hit: { id: Id; a: number } | null = null;
+    for (const f of Object.values(doc.site.features)) if (f.polygon && pointInPolygon(p, f.polygon)) { const a = Math.abs(f.polygon.reduce((acc, q, i) => { const n = f.polygon![(i + 1) % f.polygon!.length]; return acc + q.x * n.y - n.x * q.y; }, 0)); if (!hit || a < hit.a) hit = { id: f.id, a }; }
+    if (hit) return { kind: 'siteFeature', id: hit.id };
+  }
   return null;
 }
 

@@ -6,7 +6,9 @@
 import { create } from 'zustand';
 import { applyPatches, type Patch } from 'immer';
 import { applyOps, OpError, type OpCall } from '../core/ops';
-import type { ElementRef, Id, ProjectDoc, RenderStyle, RoleId, VersionRecord } from '../core/model/types';
+import type { ElementRef, Id, ProjectDoc, RenderStyle, RoleId, SiteFeatureKind, VersionRecord } from '../core/model/types';
+import { LINEAR_FEATURES } from '../core/model/types';
+import { ASSET_BY_ID, isGroundAsset } from '../core/catalog/assets';
 import { activeBuilding, levelsSorted } from '../core/model/query';
 import { uid } from '../core/model/ids';
 import { ME } from '../core/model/org';
@@ -25,7 +27,9 @@ import { seedProjects } from './seed';
 export type Space = 'design' | 'site' | 'docs' | 'cost' | 'analysis' | 'collab' | 'versions' | 'library' | 'settings';
 export type HomeSection = 'home' | 'projects' | 'shared' | 'templates' | 'library' | 'admin';
 export type Route = { name: 'home'; section: HomeSection } | { name: 'project'; id: Id; space: Space };
-export type Tool = 'select' | 'wall' | 'room' | 'door' | 'window' | 'stair' | 'column' | 'comment' | 'place' | 'pan' | 'block';
+export type Tool = 'select' | 'wall' | 'room' | 'door' | 'window' | 'stair' | 'column' | 'comment' | 'place' | 'pan' | 'block' | 'surface' | 'linear';
+/** What the surface (drag a rectangle) and linear (click a line) landscape tools will create. */
+export interface PlaceSite { kind: SiteFeatureKind; name: string; material?: string; props?: Record<string, string | number | boolean> }
 export interface PlaceBlock { blockId: string; size: string; rotation: number }
 export type ViewMode = 'plan' | '3d' | 'split';
 
@@ -51,6 +55,7 @@ interface State {
   tool: Tool;
   placeAsset: string | null;
   placeRotation: number;
+  placeSite: PlaceSite | null;
   proposal: ProposalState | null;
   saveState: 'saved' | 'saving' | 'offline' | 'error';
   online: boolean;
@@ -62,6 +67,8 @@ interface State {
   aiOpen: boolean;
   renderStyle: RenderStyle;
   sun: { month: number; day: number; hour: number };
+  /** How the 3D view is lit and dressed — a view setting, not part of the model. */
+  view3d: { weather: 'clear' | 'cloudy' | 'overcast' | 'haze'; quality: 'fast' | 'balanced' | 'high'; season: 'spring' | 'summer' | 'autumn' | 'winter'; plantAge: number; context: boolean };
   layers: { furniture: boolean; dimensions: boolean; site: boolean; underlay: boolean; issues: boolean; comments: boolean; levelBelow: boolean; grid: boolean };
   snap: { grid: boolean; endpoints: boolean; ortho: boolean };
   focus: { point: { x: number; y: number }; levelId?: Id; at: number } | null;
@@ -102,6 +109,8 @@ interface Actions {
   setApiKey(k: string): Promise<void>;
   setTheme(t: 'light' | 'dark'): void;
   startBlock(blockId: string, size: string): void;
+  startSite(spec: PlaceSite): void;
+  startPlant(assetId: string): void;
   setSimpleMode(v: boolean): void;
   saveNow(): Promise<void>;
 }
@@ -134,6 +143,7 @@ export const useStore = create<Store>((setState, getState) => ({
   tool: 'select',
   placeAsset: null,
   placeRotation: 0,
+  placeSite: null,
   proposal: null,
   saveState: 'saved',
   online: typeof navigator === 'undefined' ? true : navigator.onLine,
@@ -145,6 +155,7 @@ export const useStore = create<Store>((setState, getState) => ({
   aiOpen: false,
   renderStyle: 'realistic',
   sun: { month: 1, day: 15, hour: 10 },
+  view3d: { weather: 'clear', quality: 'balanced', season: 'summer', plantAge: 1, context: true },
   layers: { furniture: true, dimensions: true, site: true, underlay: true, issues: true, comments: true, levelBelow: true, grid: true },
   snap: { grid: true, endpoints: true, ortho: true },
   focus: null,
@@ -308,7 +319,21 @@ export const useStore = create<Store>((setState, getState) => ({
     setState({ selection: sel });
   },
   setHover(ref) { if (getState().hover?.id !== ref?.id) setState({ hover: ref }); },
-  setTool(t, asset) { setState({ tool: t, placeAsset: asset ?? (t === 'place' ? getState().placeAsset : null), ...(t !== 'block' ? { placeBlock: null } : {}), ...(t !== 'select' ? { selection: [] } : {}) }); },
+  setTool(t, asset) { setState({ tool: t, placeAsset: asset ?? (t === 'place' ? getState().placeAsset : null), ...(t !== 'block' ? { placeBlock: null } : {}), ...(t !== 'surface' && t !== 'linear' ? { placeSite: null } : {}), ...(t !== 'select' ? { selection: [] } : {}) }); },
+  /** Landscape work happens on the ground: switch to the plan and the ground floor, then arm the tool. */
+  startSite(spec) {
+    const st = getState();
+    const b = st.doc ? activeBuilding(st.doc) : null;
+    const ground = b ? Object.values(b.levels).sort((x, y) => x.order - y.order).find((l) => l.elevation >= 0) ?? Object.values(b.levels)[0] : null;
+    setState({ tool: LINEAR_FEATURES.includes(spec.kind) ? 'linear' : 'surface', placeSite: spec, placeAsset: null, placeBlock: null, selection: [], view: st.view === '3d' ? 'plan' : st.view, levelId: ground?.id ?? st.levelId, layers: { ...st.layers, site: true } });
+  },
+  startPlant(assetId) {
+    const st = getState();
+    const b = st.doc ? activeBuilding(st.doc) : null;
+    const ground = b ? Object.values(b.levels).sort((x, y) => x.order - y.order).find((l) => l.elevation >= 0) ?? Object.values(b.levels)[0] : null;
+    const onGround = isGroundAsset(ASSET_BY_ID[assetId]);
+    setState({ tool: 'place', placeAsset: assetId, placeBlock: null, placeSite: null, selection: [], view: st.view === '3d' ? 'plan' : st.view, levelId: onGround ? ground?.id ?? st.levelId : st.levelId });
+  },
   startBlock(blockId, size) { setState({ tool: 'block', placeBlock: { blockId, size, rotation: getState().placeBlock?.blockId === blockId ? getState().placeBlock!.rotation : 0 }, selection: [], view: getState().view === '3d' ? 'plan' : getState().view }); },
   setSimpleMode(v) { void setSetting('simpleMode', v); setState({ simpleMode: v }); },
   setLevel(id) { setState({ levelId: id, selection: [] }); },
@@ -462,3 +487,6 @@ async function onPeerMessage(m: { type: string; tab: string; id?: string; projec
 }
 
 export { auraVilla };
+
+// Dev-only handle for scripted checks; never present in production builds.
+if (import.meta.env.DEV && typeof window !== 'undefined') (window as unknown as { __plinthStore?: typeof useStore }).__plinthStore = useStore;

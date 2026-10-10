@@ -5,9 +5,9 @@
  * geometric representation shared by the real-time 3D viewport, elevations,
  * sections and exports (glTF/OBJ/IFC). There is no second geometry system.
  */
-import type { BuildingModel, Door, ElementRef, Id, Level, ProjectDoc, Wall, Window } from '../model/types';
+import { HARD_FEATURES, type BuildingModel, type Door, type ElementRef, type Id, type Level, type ProjectDoc, type SiteFeature, type Wall, type Window } from '../model/types';
 import { type Vec2, type Vec3, add, norm, perp, polygonNormal3, rotate, scale, sub } from '../geometry/vec';
-import { type Polygon, bbox, difference, ensureCCW, signedArea } from '../geometry/polygon';
+import { type Polygon, bbox, difference, ensureCCW, offsetPolygonEdges, signedArea } from '../geometry/polygon';
 import { levelAbove, levelsSorted, openingsOf, isDoor } from '../model/query';
 import { deriveLevel, type DerivedLevel } from './level';
 import { computeRoof } from './roof';
@@ -19,7 +19,7 @@ export interface Face3 { outer: Vec3[]; holes?: Vec3[][]; normal: Vec3 }
 
 export type SolidLayer =
   | 'wall' | 'slab' | 'floor' | 'roof' | 'stair' | 'door' | 'frame' | 'glass' | 'column' | 'beam'
-  | 'site' | 'ground' | 'road' | 'water' | 'parapet' | 'gable';
+  | 'site' | 'ground' | 'road' | 'water' | 'parapet' | 'gable' | 'landscape';
 
 export interface Solid {
   id: string;
@@ -259,33 +259,92 @@ function buildColumns(out: Solid[], b: BuildingModel, level: Level, topGap: numb
   }
 }
 
+/** Default height and thickness of hedges, fences and garden walls, mm. */
+export const LINEAR_DEFAULTS: Record<string, { height: number; width: number; material: string }> = {
+  hedge: { height: 1200, width: 600, material: 'hedge' },
+  fence: { height: 1500, width: 50, material: 'wood-cladding' },
+  wall: { height: 1800, width: 200, material: 'ext-texture' },
+};
+/** Finished level of each paved surface above the lawn, mm. */
+export const SURFACE_Z: Record<string, number> = { deck: 150, patio: 40, gravel: 12, driveway: 20, parking: 20, pathway: 25, bed: 30, lawn: 6 };
+
+export function linearSpec(f: SiteFeature) {
+  const d = LINEAR_DEFAULTS[f.kind] ?? LINEAR_DEFAULTS.wall;
+  return { height: Number(f.props.height ?? d.height), width: Number(f.props.width ?? d.width), material: f.materialId ?? d.material };
+}
+
+function buildLinear(out: Solid[], f: SiteFeature) {
+  const path = f.path ?? [];
+  const { height, width, material } = linearSpec(f);
+  const ref: ElementRef = { kind: 'siteFeature', id: f.id };
+  const closed = path.length > 2 && Math.hypot(path[0].x - path[path.length - 1].x, path[0].y - path[path.length - 1].y) < 5;
+  const pts = closed ? path.slice(0, -1) : path;
+  const n = closed ? pts.length : pts.length - 1;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 50) continue;
+    const u = norm(sub(b, a)), v = perp(u);
+    // Run slightly past each corner so consecutive runs close without a notch.
+    const ext = closed || (i > 0 && i < n - 1) ? width / 2 : i > 0 ? width / 2 : 0, extEnd = closed || i < n - 1 ? width / 2 : 0;
+    const o = add(add(a, scale(u, -ext)), scale(v, -width / 2));
+    if (f.kind === 'fence') {
+      out.push({ id: `lf-${f.id}-${i}`, ref, materialId: material, layer: 'landscape', faces: boxFaces(add(o, scale(v, 0)), u, len + ext + extEnd, width, 120, height) });
+      const posts = Math.max(1, Math.round(len / 2400));
+      const faces: Face3[] = [];
+      for (let k = 0; k <= posts; k++) faces.push(...boxFaces(add(add(a, scale(u, (len / posts) * k - 50)), scale(v, -50)), u, 100, 100, 0, height + 80));
+      out.push({ id: `lp-${f.id}-${i}`, ref, materialId: material, layer: 'landscape', faces });
+    } else if (f.kind === 'wall') {
+      out.push({ id: `lf-${f.id}-${i}`, ref, materialId: material, layer: 'landscape', faces: boxFaces(o, u, len + ext + extEnd, width, 0, height) });
+      out.push({ id: `lc-${f.id}-${i}`, ref, materialId: String(f.props.coping ?? 'granite-paving'), layer: 'landscape', faces: boxFaces(add(add(o, scale(u, -30)), scale(v, -30)), u, len + ext + extEnd + 60, width + 60, height, height + 60) });
+    } else {
+      out.push({ id: `lf-${f.id}-${i}`, ref, materialId: material, layer: 'landscape', faces: boxFaces(o, u, len + ext + extEnd, width, 0, height) });
+    }
+  }
+}
+
 function buildSite(out: Solid[], doc: ProjectDoc) {
   const site = doc.site;
   const plot = ensureCCW(site.boundary);
   const bb = bbox(plot);
-  const pad = Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY) * 1.2;
+  const pad = Math.max(120000, Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY) * 5);
   const ground: Polygon = [{ x: bb.minX - pad, y: bb.minY - pad }, { x: bb.maxX + pad, y: bb.minY - pad }, { x: bb.maxX + pad, y: bb.maxY + pad }, { x: bb.minX - pad, y: bb.maxY + pad }];
   out.push({ id: 'ground', materialId: 'ground', layer: 'ground', faces: [face(ground.map((p) => lift(p, -30)), [[...plot].reverse().map((p) => lift(p, -30))])] });
   const features = Object.values(site.features);
-  const pools = features.filter((f) => f.kind === 'pool' && f.polygon);
-  const hard = features.filter((f) => (f.kind === 'driveway' || f.kind === 'pathway' || f.kind === 'parking' || f.kind === 'deck') && f.polygon);
-  const lawnHoles = [...pools, ...hard].map((f) => f.polygon!);
+  const areas = features.filter((f) => f.polygon && f.polygon.length > 2);
+  const water = areas.filter((f) => f.kind === 'pool' || f.kind === 'pond');
+  const surfaces = areas.filter((f) => HARD_FEATURES.includes(f.kind) || f.kind === 'bed' || (f.kind === 'lawn' && f.materialId && f.materialId !== 'lawn'));
+  const lawnHoles = [...water, ...surfaces].map((f) => f.polygon!);
   const lawn = lawnHoles.length ? difference([plot], lawnHoles) : [{ outer: plot, holes: [] }];
   out.push({ id: 'plot', materialId: 'lawn', layer: 'site', faces: lawn.map((l) => face(ensureCCW(l.outer).map((p) => lift(p, 0)), l.holes.map((h) => [...ensureCCW(h)].reverse().map((p) => lift(p, 0))))) });
-  for (const f of hard) {
-    const z = f.kind === 'deck' ? 150 : 20;
-    out.push({ id: `feat-${f.id}`, ref: { kind: 'siteFeature', id: f.id }, materialId: f.materialId ?? 'paver', layer: 'site', faces: prismFaces(f.polygon!, 0, z) });
+  for (const f of surfaces) {
+    const z = SURFACE_Z[f.kind] ?? 20;
+    const fallback = f.kind === 'bed' ? 'mulch' : f.kind === 'gravel' ? 'gravel' : f.kind === 'deck' ? 'deck-wood' : f.kind === 'patio' ? 'sandstone-paving' : 'paver';
+    out.push({ id: `feat-${f.id}`, ref: { kind: 'siteFeature', id: f.id }, materialId: f.materialId ?? fallback, layer: 'site', faces: prismFaces(f.polygon!, 0, z) });
+    // A raised planting bed gets a slim stone edge so it reads as built.
+    if (f.kind === 'bed') {
+      const p = ensureCCW(f.polygon!);
+      const inner = offsetPolygonEdges(p, p.map(() => 80));
+      if (inner.length === p.length) out.push({ id: `edge-${f.id}`, ref: { kind: 'siteFeature', id: f.id }, materialId: 'granite-paving', layer: 'site', faces: prismFaces(p, 0, z + 50, { holes: [inner] }) });
+    }
   }
-  for (const f of pools) {
+  for (const f of water) {
     const poly = ensureCCW(f.polygon!);
-    const coping: Face3[] = [];
+    const pond = f.kind === 'pond';
+    const depth = pond ? 500 : 1200, level = pond ? -50 : -150;
+    const walls: Face3[] = [];
     for (let i = 0; i < poly.length; i++) {
       const a = poly[i], c = poly[(i + 1) % poly.length];
-      coping.push(face([lift(c, -1200), lift(a, -1200), lift(a, 60), lift(c, 60)]));
+      walls.push(face([lift(c, -depth), lift(a, -depth), lift(a, pond ? 0 : 10), lift(c, pond ? 0 : 10)]));
     }
-    out.push({ id: `pool-wall-${f.id}`, ref: { kind: 'siteFeature', id: f.id }, materialId: 'pool-tile', layer: 'site', faces: [...coping, face(poly.map((p) => lift(p, -1200)))] });
-    out.push({ id: `pool-water-${f.id}`, ref: { kind: 'siteFeature', id: f.id }, materialId: 'pool-water', layer: 'water', faces: [face(poly.map((p) => lift(p, -150)))] });
+    const ref: ElementRef = { kind: 'siteFeature', id: f.id };
+    out.push({ id: `pool-wall-${f.id}`, ref, materialId: pond ? 'crazy-paving' : 'pool-tile', layer: 'site', faces: [...walls, face(poly.map((p) => lift(p, -depth)))] });
+    out.push({ id: `pool-water-${f.id}`, ref, materialId: f.materialId ?? (pond ? 'pond-water' : 'pool-water'), layer: 'water', faces: [face(poly.map((p) => lift(p, level)))] });
+    // Coping: a paved band around the water's edge.
+    const outer = offsetPolygonEdges(poly, poly.map(() => (pond ? -220 : -350)));
+    if (outer.length === poly.length) out.push({ id: `coping-${f.id}`, ref, materialId: String(f.props.coping ?? (pond ? 'crazy-paving' : 'travertine')), layer: 'site', faces: prismFaces(outer, 0, pond ? 35 : 55, { holes: [poly] }) });
   }
+  for (const f of features) if (f.path && f.path.length > 1) buildLinear(out, f);
   // Roads along road-facing edges give the model its real context.
   plot.forEach((p, i) => {
     const n = site.boundary.length;

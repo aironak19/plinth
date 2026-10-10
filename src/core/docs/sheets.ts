@@ -12,12 +12,13 @@ import type { BuildingModel, Id, ProjectDoc } from '../model/types';
 import { activeBuilding, levelsSorted } from '../model/query';
 import { resolveRules } from '../rules/rulesets';
 import {
-  type DrawingResult, type ElevationDir, type SectionCut, drawElevation, drawPlan, drawRoofPlan, drawSection, drawSitePlan, suggestSectionCut,
+  type DrawingResult, type ElevationDir, type SectionCut, drawElevation, drawLandscapePlan, drawPlan, drawRoofPlan, drawSection, drawSitePlan, suggestSectionCut,
 } from './drawings';
 import {
-  AREA_COLUMNS, DOOR_COLUMNS, ROOM_COLUMNS, TAKEOFF_COLUMNS, WINDOW_COLUMNS, type TableColumn, type TableRow,
-  areaStatement, doorSchedule, keyValueSvg, roomSchedule, tableLayout, tableSvg, takeoffSummary, windowSchedule,
+  AREA_COLUMNS, DOOR_COLUMNS, HARDSCAPE_COLUMNS, PLANTING_COLUMNS, ROOM_COLUMNS, TAKEOFF_COLUMNS, WINDOW_COLUMNS, type TableColumn, type TableRow,
+  areaStatement, doorSchedule, hardscapeSchedule, keyValueSvg, landscapeSummary, plantingSchedule, roomSchedule, tableLayout, tableSvg, takeoffSummary, windowSchedule,
 } from './schedules';
+import { analyzeLandscape } from '../derive/landscape';
 import { analyzeSite } from '../derive/site';
 import { formatArea, formatLength } from '../units';
 import { FONT, GREY, INK, LW, line, northArrow, num, rect, scaleBar, text, textWidth, wrapText } from './svg';
@@ -32,7 +33,7 @@ export const SHEET_SIZES: Record<SheetSize, { w: number; h: number }> = {
 /** Architectural scales the auto-fit chooses from (1:n). */
 export const SCALES = [50, 75, 100, 150, 200, 250, 500];
 
-export type SheetViewKind = 'plan' | 'site' | 'roof' | 'elevation' | 'section' | 'table' | 'keyvalue' | 'cover';
+export type SheetViewKind = 'plan' | 'site' | 'landscape' | 'roof' | 'elevation' | 'section' | 'table' | 'keyvalue' | 'cover';
 
 export interface SheetView {
   kind: SheetViewKind;
@@ -80,6 +81,8 @@ export interface SheetSetOptions {
 
 const TITLE_BAND = 13;
 const GAP = 8;
+/** Row pitch of a key/value list at the default 2.2 mm text (see `keyValueSvg`). */
+const KV_ROW = 2.2 * 2.3;
 
 interface Geom { W: number; H: number; m: number; tb: number; area: { x: number; y: number; w: number; h: number } }
 
@@ -163,6 +166,42 @@ export function buildSheetSet(doc: ProjectDoc, b: BuildingModel, opts: SheetSetO
     });
   }
 
+  // L-series: landscape plan and schedules — only once the project has planting or site features,
+  // so a bare building keeps the sheet list it always had.
+  const landscapeSheets = () => {
+    if (doc.site.boundary.length < 3) return;
+    const la = analyzeLandscape(doc, b);
+    if (!la.hasLandscape) return;
+    const planting = plantingSchedule(doc, b, la);
+    const keyW = planting.length ? Math.min(66, A.w * 0.26) : 0;
+    const cellW = A.w - (keyW ? keyW + GAP : 0);
+    const s = fitScale(drawLandscapePlan(doc, b, { scale: 100 }, la), cellW, A.h);
+    const views: SheetView[] = [{ kind: 'landscape', title: 'Landscape plan', scale: s, x: A.x, y: A.y, w: cellW, h: A.h }];
+    if (keyW) {
+      // Plant key beside the plan; the full schedule follows on L-102.
+      const fitRows = Math.max(1, Math.floor((A.h - 6) / KV_ROW) - 1);
+      const shown = planting.length > fitRows ? planting.slice(0, fitRows - 1) : planting;
+      const items = shown.map((r) => ({ label: r.key, value: truncate(`${r.common} · ${r.qty}`, keyW - 14, 2.2) }));
+      if (shown.length < planting.length) items.push({ label: '…', value: `+ ${planting.length - shown.length} more on L-102` });
+      views.push({ kind: 'keyvalue', title: 'Plant key · quantity', items, x: A.x + cellW + GAP, y: A.y, w: keyW, h: A.h });
+    }
+    // The plan carries its own north arrow: the sheet's usual corner is taken by the plant key.
+    out.push({ number: 'L-101', title: 'Landscape plan', scale: `1:${s}`, north: false, views });
+
+    // Remarks take whatever width the other columns leave, so the table always fits the sheet.
+    const fixed = tableLayout(PLANTING_COLUMNS.filter((c) => c.key !== 'remarks'), planting).width;
+    const columns = PLANTING_COLUMNS.map((c) => (c.key === 'remarks' ? { ...c, width: Math.max(24, Math.min(110, A.w - fixed - 1)) } : c));
+    const blocks: TableBlock[] = [
+      ...(planting.length ? [{ title: 'Planting schedule', columns, rows: planting, note: 'Sizes are mature garden sizes. Quantities include hedge plants at the stated spacing. Keys match the tags on L-101.' }] : []),
+      { title: 'Hardscape schedule', columns: HARDSCAPE_COLUMNS, rows: hardscapeSchedule(doc, b, la) },
+      { title: 'Landscape summary', columns: [{ key: 'label', label: 'Item' }, { key: 'value', label: 'Value', align: 'end' as const }], rows: landscapeSummary(doc, b, la), note: 'Irrigation is a planning figure for mature planting in the dry season.' },
+    ];
+    const pages = flowTables(blocks.filter((bl) => bl.rows.length), A);
+    pages.forEach((v, i) => out.push({ number: `L-${102 + i}`, title: pages.length > 1 ? `Planting & hardscape schedule (${i + 1}/${pages.length})` : 'Planting & hardscape schedule', scale: 'NTS', north: false, views: v }));
+  };
+
+  if (!hasBuilding) landscapeSheets();
+
   if (hasBuilding) {
     // Floor plans: one common scale.
     const planMeasures = levels.map((l) => drawPlan(doc, b, l.id, { scale: 100, cuts }));
@@ -198,6 +237,8 @@ export function buildSheetSet(doc: ProjectDoc, b: BuildingModel, opts: SheetSetO
       const s = fitScale(drawRoofPlan(doc, b, { scale: 100 }), A.w, A.h, Math.max(planScale, 50));
       out.push({ number: 'A-401', title: 'Roof plan', scale: `1:${s}`, north: true, views: [{ kind: 'roof', title: 'Roof plan', scale: s, x: A.x, y: A.y, w: A.w, h: A.h }] });
     }
+
+    landscapeSheets();
 
     // Schedules flow into columns and onto as many sheets as they need.
     let n = 601;
@@ -311,6 +352,7 @@ function renderView(doc: ProjectDoc, b: BuildingModel, sheet: SheetDef, v: Sheet
   switch (v.kind) {
     case 'plan': d = drawPlan(doc, b, v.levelId!, { scale, cuts: v.cuts }); break;
     case 'site': d = drawSitePlan(doc, b, { scale }); break;
+    case 'landscape': d = drawLandscapePlan(doc, b, { scale }); break;
     case 'roof': d = drawRoofPlan(doc, b, { scale }); break;
     case 'elevation': d = drawElevation(doc, b, v.dir ?? 'south', { scale }); break;
     default: d = drawSection(doc, b, v.axis ?? 'x', v.at ?? 0, { scale }); break;

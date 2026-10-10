@@ -240,13 +240,27 @@ export interface SiteEdge {
   road?: { name: string; width: number };
 }
 
-export type SiteFeatureKind = 'pool' | 'driveway' | 'lawn' | 'deck' | 'tree' | 'parking' | 'pathway' | 'planter';
+/**
+ * Areas: pool, pond, lawn, bed (planting), gravel, and the paved kinds
+ * (driveway, parking, pathway, patio, deck). Lines: hedge, fence and wall
+ * follow `path` with `props.height` / `props.width`.
+ */
+export type SiteFeatureKind = 'pool' | 'driveway' | 'lawn' | 'deck' | 'tree' | 'parking' | 'pathway' | 'planter'
+  | 'patio' | 'bed' | 'gravel' | 'pond' | 'hedge' | 'fence' | 'wall';
+
+export const LINEAR_FEATURES: SiteFeatureKind[] = ['hedge', 'fence', 'wall'];
+/** Paved, impermeable or semi-permeable ground. */
+export const HARD_FEATURES: SiteFeatureKind[] = ['driveway', 'parking', 'pathway', 'patio', 'deck', 'gravel'];
+/** Planted or water — counts as soft landscape. */
+export const SOFT_FEATURES: SiteFeatureKind[] = ['lawn', 'bed', 'pond'];
 
 export interface SiteFeature {
   id: Id;
   kind: SiteFeatureKind;
   name: string;
   polygon?: Vec2[];
+  /** Centre-line of a hedge, fence or garden wall. */
+  path?: Vec2[];
   position?: Vec2;
   radius?: number;
   materialId?: Id;
