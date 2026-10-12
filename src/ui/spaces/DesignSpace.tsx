@@ -168,6 +168,8 @@ function ContextBar() {
       <>
         {quick.map(([blockId, size, label]) => <button key={blockId} onClick={() => attach(b, tag.levelId, tag.id, tag.name, blockId, size)} title={`Add ${BLOCK_BY_ID[blockId]?.name.toLowerCase()} next to ${tag.name}`}><Plus size={13} /> {label}</button>)}
         {quick.length > 0 && <span className="sep" />}
+        <button onClick={() => useStore.getState().viewInside(tag.id)} title={`Step inside ${tag.name} in 3D`}><Footprints size={13} /> View inside</button>
+        <span className="sep" />
         <button onClick={() => window.dispatchEvent(new CustomEvent('plinth:rename'))}>Rename</button>
         <button onClick={() => set('aiOpen', false)}><Palette size={14} /> Finishes</button>
         <button onClick={() => { set('aiOpen', true); setTimeout(() => window.dispatchEvent(new CustomEvent('plinth:ask', { detail: `Make the ${tag.name} 2 ft wider` })), 50); }}><Sparkles size={14} /> Larger</button>

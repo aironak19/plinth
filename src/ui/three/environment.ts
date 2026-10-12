@@ -8,7 +8,7 @@
 import * as THREE from 'three';
 import { Sky } from 'three/examples/jsm/objects/Sky.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { setNight } from './materials3d';
+import { setNight, setInterior } from './materials3d';
 
 export type Weather = 'clear' | 'cloudy' | 'overcast' | 'haze';
 export const WEATHERS: { id: Weather; label: string }[] = [{ id: 'clear', label: 'Clear' }, { id: 'cloudy', label: 'Scattered cloud' }, { id: 'overcast', label: 'Overcast' }, { id: 'haze', label: 'Warm haze' }];
@@ -23,7 +23,10 @@ export interface Environment {
   stars: THREE.Points;
   /** 0 day → 1 night, for anything else that wants to follow the light. */
   night: number;
-  update(o: { dir: THREE.Vector3; altitude: number; weather: Weather; realistic: boolean; center: THREE.Vector3; span: number; shadowSize: number }): void;
+  /** 0 → 1 daylight strength, and the colour of the sky's light — used for daylight entering through windows. */
+  day: number;
+  skyTint: THREE.Color;
+  update(o: { dir: THREE.Vector3; altitude: number; weather: Weather; realistic: boolean; center: THREE.Vector3; span: number; shadowSize: number; interior?: { on: boolean; lights: boolean } }): void;
   tick(dt: number): void;
   dispose(): void;
 }
@@ -45,6 +48,8 @@ export function createEnvironment(renderer: THREE.WebGLRenderer, scene: THREE.Sc
   let envRT: THREE.WebGLRenderTarget | null = null;
   let bakeTimer = 0;
   let pendingKey = '', bakedKey = '';
+  let inside = false;
+  let skyEnv: THREE.Texture | null = null;
 
   const sun = new THREE.DirectionalLight('#fff3e0', 3);
   sun.castShadow = true;
@@ -79,13 +84,16 @@ export function createEnvironment(renderer: THREE.WebGLRenderer, scene: THREE.Sc
   scene.add(sun, sun.target, moon, moon.target, fill);
 
   const env: Environment = {
-    sky, extras: [stars, dusk], sun, moon, fill, stars, night: 0,
-    update({ dir, altitude, weather, realistic, center, span, shadowSize }) {
+    sky, extras: [stars, dusk], sun, moon, fill, stars, night: 0, day: 1, skyTint: new THREE.Color('#cfe0ff'),
+    update({ dir, altitude, weather, realistic, center, span, shadowSize, interior }) {
+      inside = !!interior?.on && realistic;
+      setInterior(inside, !!interior?.lights);
       const day = smooth(-2, 24, altitude);
       const night = 1 - smooth(-7, 3, altitude);
       env.night = realistic ? night : 0;
       setNight(env.night);
       const golden = 1 - smooth(4, 28, altitude);
+      env.day = day * (1 - night);
       const cloud = weather === 'overcast' ? 1 : weather === 'cloudy' ? 0.45 : 0;
 
       // ---- direct light
@@ -137,6 +145,18 @@ export function createEnvironment(renderer: THREE.WebGLRenderer, scene: THREE.Sc
       scene.environmentIntensity = 0.34 + 0.3 * cloud + 0.5 * (1 - day) * (1 - night) + night * 1.2;
       const haze = new THREE.Color().setHSL(0.58 - 0.5 * golden * (1 - cloud) * (1 - night), 0.25 + 0.2 * golden, (0.82 - 0.1 * golden) * (1 - night * 0.93));
       scene.fog = new THREE.Fog(haze, span * 2.6 + 90, span * 9 + 520);
+      env.skyTint.setHSL(0.6 - 0.52 * golden * (1 - cloud), 0.3 + 0.35 * golden - 0.2 * cloud, 0.8);
+      if (inside) {
+        // Indoors the open sky must not light every surface as if the roof were missing. Daylight
+        // arrives through the glazing instead (sun shadows plus sky "portals" at the windows), a
+        // neutral studio map supplies soft reflections, and the eye — the exposure — opens up.
+        scene.environment = studio;
+        scene.environmentIntensity = 0.1 + 0.2 * env.day + (interior?.lights ? 0.1 : 0);
+        // Light bounced up off the floor is what brightens a ceiling.
+        fill.color.set('#fff4e6'); fill.groundColor.set('#f1e8da');
+        fill.intensity = 0.08 + 0.36 * env.day * (1 - 0.3 * cloud) + (interior?.lights ? 0.1 : 0);
+        renderer.toneMappingExposure = (0.82 + 0.25 * (1 - day) + 0.1 * cloud) * (1 + night * 0.12);
+      } else if (skyEnv) scene.environment = skyEnv;
 
       // Re-bake the lighting environment shortly after the sky stops changing.
       pendingKey = `${sunDir.x.toFixed(3)},${sunDir.y.toFixed(3)},${sunDir.z.toFixed(3)}|${weather}`;
@@ -151,7 +171,8 @@ export function createEnvironment(renderer: THREE.WebGLRenderer, scene: THREE.Sc
       if (bakeTimer > 0) return;
       bakeSky.material.uniforms.time.value = u.time.value;
       const next = pmrem.fromScene(bakeScene, 0, 1, 4000);
-      scene.environment = next.texture;
+      skyEnv = next.texture;
+      if (!inside) scene.environment = next.texture;
       envRT?.dispose();
       envRT = next;
       bakedKey = pendingKey;

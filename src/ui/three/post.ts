@@ -20,7 +20,7 @@ export const QUALITIES: { id: Quality; label: string; hint: string }[] = [
 export interface Post {
   render(dt: number): void;
   setSize(w: number, h: number, pixelRatio: number): void;
-  configure(o: { quality: Quality; ao: boolean; night: number; hideInAO: THREE.Object3D[] }): void;
+  configure(o: { quality: Quality; ao: boolean; night: number; hideInAO: THREE.Object3D[]; interior?: boolean }): void;
   dispose(): void;
 }
 
@@ -51,14 +51,17 @@ export function createPost(renderer: THREE.WebGLRenderer, scene: THREE.Scene, ca
   return {
     render(dt) { if (enabled) composer.render(dt); else renderer.render(scene, camera); },
     setSize(w, h, pr) { composer.setPixelRatio(pr); composer.setSize(w, h); },
-    configure({ quality, ao, night, hideInAO }) {
+    configure({ quality, ao, night, hideInAO, interior }) {
       enabled = quality !== 'fast' && ao;
       hidden = hideInAO;
       gtao.enabled = ao;
-      gtao.updateGtaoMaterial({ samples: quality === 'high' ? 16 : 10 });
+      // Rooms are small: tighter, stronger occlusion picks out skirtings, corners and the feet of furniture.
+      gtao.updateGtaoMaterial({ samples: quality === 'high' ? 16 : 10, radius: interior ? 0.55 : 0.9, scale: interior ? 1.35 : 1.15 });
+      gtao.blendIntensity = interior ? 1.1 : 0.9;
       bloom.enabled = quality === 'high' || night > 0.2;
-      bloom.strength = 0.1 + night * 0.16;
-      bloom.threshold = 1.05 - night * 0.2;
+      // Indoors the lit surfaces fill the frame, so glow is kept to the fittings themselves.
+      bloom.strength = interior ? 0.07 : 0.1 + night * 0.16;
+      bloom.threshold = interior ? 1.25 : 1.05 - night * 0.2;
       bloom.radius = 0.45 + night * 0.15;
     },
     dispose() { composer.dispose(); target.dispose(); },

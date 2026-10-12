@@ -72,6 +72,18 @@ const ell = (x: number, y: number, rx: number, ry: number, rot: number) => (g: C
 type Painter = (p: Pair, m: Material) => { grain: number; relief: number; normal: number; grainFreq?: number };
 
 const PAINT: Record<Exclude<MaterialPattern, 'none' | 'water'>, Painter> = {
+  // Joinery: one continuous sheet of straight grain, running up the texture — no board joints.
+  veneer: (p, m) => {
+    for (let i = 0; i < 150; i++) {
+      const x = p.r() * S, a = 0.035 + p.r() * 0.085, w1 = p.r() * 14 - 7, w2 = p.r() * 14 - 7, dark = p.r() > 0.35;
+      for (const [g, st] of [[p.c, dark ? `rgba(50,28,10,${a})` : `rgba(255,236,205,${a * 0.8})`], [p.h, `rgba(${dark ? '0,0,0' : '255,255,255'},${a})`]] as const) {
+        g.strokeStyle = st; g.lineWidth = 0.6 + p.r() * 2.4; g.beginPath();
+        for (const dx of [-S, 0, S]) { g.moveTo(x + dx, -4); g.bezierCurveTo(x + dx + w1, S * 0.33, x + dx + w2, S * 0.66, x + dx, S + 4); }
+        g.stroke();
+      }
+    }
+    return { grain: 0.05, relief: 0.02, normal: 0.6, grainFreq: 5 };
+  },
   wood: (p, m) => planks(p, m, false),
   plank: (p, m) => planks(p, m, true),
   tile: (p, m) => {
@@ -234,7 +246,7 @@ export function textureSet(m: Material, pattern: Exclude<MaterialPattern, 'none'
   const hit = cache.get(key);
   if (hit) return hit;
   const seed = hash(key);
-  const flat = pattern === 'concrete' || pattern === 'plaster' || pattern === 'asphalt' || pattern === 'marble' || pattern === 'soil';
+  const flat = pattern === 'concrete' || pattern === 'plaster' || pattern === 'asphalt' || pattern === 'marble' || pattern === 'soil' || pattern === 'veneer';
   const p = pair(seed, m.color, flat || pattern === 'grass' ? 0.5 : 0.2);
   const k = PAINT[pattern](p, m);
   // Per-pixel weathering: large blotches plus fine grain, applied to both colour and height.

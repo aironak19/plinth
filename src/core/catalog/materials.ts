@@ -11,7 +11,7 @@ export type MaterialCategory =
   | 'paint' | 'plaster' | 'wallpaper' | 'roofing' | 'landscape' | 'water';
 
 export type MaterialPattern = 'none' | 'wood' | 'tile' | 'brick' | 'stone' | 'marble' | 'grass' | 'water' | 'concrete' | 'tiles-roof' | 'plank'
-  | 'gravel' | 'cobble' | 'herringbone' | 'crazy' | 'soil' | 'foliage' | 'asphalt' | 'plaster';
+  | 'gravel' | 'cobble' | 'herringbone' | 'crazy' | 'soil' | 'foliage' | 'asphalt' | 'plaster' | 'veneer';
 
 export type CostUnit = 'm2' | 'm3' | 'nos' | 'rm';
 

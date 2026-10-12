@@ -11,10 +11,13 @@ import { levelsSorted } from '../../core/model/query';
 import { pointInPolygon, distToPolygonEdge, bbox } from '../../core/geometry/polygon';
 import { PLANT_BY_ID } from '../../core/catalog/plants';
 import { rng, hash } from './textures';
-import { buildSolids, SURFACE_Z, type Face3, type Solid } from '../../core/derive/solids';
+import { buildSolids, SURFACE_Z, ceilingHeightOf, type Face3, type Solid } from '../../core/derive/solids';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { levelAbove, openingsOf, isDoor } from '../../core/model/query';
+import { norm, perp, sub, add, scale } from '../../core/geometry/vec';
 import type { RuleSet } from '../../core/rules/rulesets';
 import { ASSET_BY_ID, assetColors, isOutdoorAsset } from '../../core/catalog/assets';
-import { material3d, edgeMaterial } from './materials3d';
+import { material3d, edgeMaterial, joineryMaterial } from './materials3d';
 import { cross3, norm3, type Vec3 } from '../../core/geometry/vec';
 
 /** Plan mm (x east, y north, z up) → three metres (x, y up, z south). */
@@ -63,15 +66,19 @@ export function solidGeometry(faces: Face3[], repeatMm?: number): THREE.BufferGe
   return g;
 }
 
-export interface SceneLight { position: THREE.Vector3; color: string; power: number; range: number }
+export interface SceneLight { position: THREE.Vector3; color: string; power: number; range: number; roomId?: string }
+/** A window or glazed door seen from inside: where daylight enters a room. */
+export interface Portal { center: THREE.Vector3; inward: THREE.Vector3; width: number; height: number; levelId: string }
 export interface SceneResult {
   group: THREE.Group; pickables: THREE.Object3D[]; byRef: Map<string, THREE.Mesh[]>;
   /** Alpha-tested leaf meshes, left out of the ambient-occlusion pre-pass. */
   foliage: THREE.Object3D[];
   /** Where lamps and lit rooms are, for night scenes. */
   lights: SceneLight[];
+  /** Glazed openings, used to bring sky light into the room being viewed. */
+  portals: Portal[];
 }
-export interface SceneView extends PlantView { context: boolean }
+export interface SceneView extends PlantView { context: boolean; /** Walking inside: doors stand open. */ interior?: boolean }
 
 const NEEDS_EDGES: RenderStyle[] = ['architectural', 'sketch', 'wireframe', 'xray'];
 
@@ -82,15 +89,17 @@ export function buildScene(doc: ProjectDoc, b: BuildingModel, rules: RuleSet, st
   const foliage: THREE.Object3D[] = [];
   const lights: SceneLight[] = [];
   const realistic = style === 'realistic';
-  const solids: Solid[] = buildSolids(doc, b, rules, { hiddenLevels });
+  const portals: Portal[] = [];
+  const solids: Solid[] = buildSolids(doc, b, rules, { hiddenLevels, doorsOpen: !!view.interior });
   const edges = NEEDS_EDGES.includes(style);
   for (const s of solids) {
     const sel = !!s.ref && selectedIds.has(s.ref.id);
-    const mat = material3d(s.materialId, style, { highlight: sel });
+    const mat = s.layer === 'ceiling' ? ceilingMaterial(s.materialId, style) : (s.layer === 'door' || s.layer === 'frame') && !sel ? joineryMaterial(s.materialId, style) : material3d(s.materialId, style, { highlight: sel });
     const geo = solidGeometry(s.faces, (mat.userData.repeatMm as number | undefined) ?? undefined);
     const mesh = new THREE.Mesh(geo, mat);
     const glass = s.layer === 'glass' || s.layer === 'water';
-    mesh.castShadow = !glass && s.layer !== 'ground' && s.layer !== 'site' && s.layer !== 'road' && s.layer !== 'floor';
+    // Ceilings never cast: the slab or roof above already does, and when upper levels are hidden the sun should reach the floor.
+    mesh.castShadow = !glass && s.layer !== 'ground' && s.layer !== 'site' && s.layer !== 'road' && s.layer !== 'floor' && s.layer !== 'ceiling';
     mesh.receiveShadow = !glass;
     mesh.userData = { ref: s.ref, levelId: s.levelId, layer: s.layer };
     if (glass) mesh.renderOrder = 2;
@@ -147,7 +156,13 @@ export function buildScene(doc: ProjectDoc, b: BuildingModel, rules: RuleSet, st
     const sel = selectedIds.has(f.id);
     for (const p of asset.parts) {
       let geo: THREE.BufferGeometry;
-      if (p.shape === 'box') { geo = new THREE.BoxGeometry(p.w / 1000, p.h / 1000, p.d / 1000); geo.translate(0, p.h / 2000, 0); }
+      if (p.shape === 'box') {
+        // Real furniture has eased edges: soft upholstery, a small arris on timber and stone.
+        const w = p.w / 1000, h = p.h / 1000, d = p.d / 1000, m = Math.min(w, h, d);
+        const soft = p.slot === 'fabric' ? Math.min(0.07, m * 0.32) : p.slot === 'glass' || p.slot === 'water' || p.slot === 'light' ? 0 : Math.min(0.012, m * 0.22);
+        geo = realistic && soft > 0.002 ? new RoundedBoxGeometry(w, h, d, p.slot === 'fabric' ? 4 : 2, soft) : new THREE.BoxGeometry(w, h, d);
+        geo.translate(0, p.h / 2000, 0);
+      }
       else if (p.shape === 'cyl') { geo = new THREE.CylinderGeometry(p.w / 2000, p.w / 2000, p.h / 1000, 24); geo.translate(0, p.h / 2000, 0); }
       else if (p.shape === 'cone') { geo = new THREE.ConeGeometry(p.w / 2000, p.h / 1000, 24); geo.translate(0, p.h / 2000, 0); }
       else if (p.shape === 'pyramid') { geo = new THREE.ConeGeometry(1, p.h / 1000, 4); geo.rotateY(Math.PI / 4); geo.scale(p.w / 1000 / Math.SQRT2, 1, p.d / 1000 / Math.SQRT2); geo.translate(0, p.h / 2000, 0); }
@@ -181,17 +196,53 @@ export function buildScene(doc: ProjectDoc, b: BuildingModel, rules: RuleSet, st
   }
 
   if (realistic) {
-    // One warm ceiling light per room, largest rooms first — the glow seen through the glass at dusk.
-    const rooms: { p: THREE.Vector3; area: number }[] = [];
+    // One warm ceiling light per room, largest rooms first — the glow seen through the glass at dusk —
+    // and recessed downlights in every ceiling, so a lit room has visible fittings.
+    const rooms: { p: THREE.Vector3; area: number; id: string }[] = [];
+    const spots: THREE.Vector3[] = [];
     for (const lv of levelsSorted(b)) {
       if (hiddenLevels.has(lv.id)) continue;
-      for (const r of deriveLevel(b, lv.id).rooms) if (r.tagId && r.fn !== 'balcony' && r.fn !== 'deck' && r.fn !== 'parking') rooms.push({ p: toThree({ x: r.labelPoint.x, y: r.labelPoint.y, z: lv.elevation + lv.height - 550 }), area: r.area });
+      const above = levelAbove(b, lv.id), topGap = above ? above.slabThickness : 0;
+      const dl = deriveLevel(b, lv.id);
+      for (const r of dl.rooms) {
+        if (!r.tagId || r.fn === 'balcony' || r.fn === 'deck' || r.fn === 'parking') continue;
+        const ch = ceilingHeightOf(lv, topGap, b.rooms[r.tagId]?.ceilingHeight);
+        rooms.push({ p: toThree({ x: r.labelPoint.x, y: r.labelPoint.y, z: lv.elevation + ch - 620 }), area: r.area, id: r.id });
+        const nx = Math.max(1, Math.min(4, Math.round(r.width / 1900))), ny = Math.max(1, Math.min(4, Math.round(r.depth / 1900)));
+        for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+          const q = { x: r.bbox.minX + (r.width / nx) * (i + 0.5), y: r.bbox.minY + (r.depth / ny) * (j + 0.5) };
+          if (pointInPolygon(q, r.polygon)) spots.push(toThree({ x: q.x, y: q.y, z: lv.elevation + ch - 3 }));
+        }
+      }
+      // Glazed openings on outside walls let the sky in.
+      for (const w of dl.walls) {
+        if (!dl.exteriorWallIds.has(w.id)) continue;
+        const d = norm(sub(w.b, w.a)), n = perp(d), len = Math.hypot(w.b.x - w.a.x, w.b.y - w.a.y);
+        const inside = (sg: number) => dl.rooms.some((r) => pointInPolygon(add(add(w.a, scale(d, len / 2)), scale(n, sg * (w.thickness / 2 + 250))), r.polygon));
+        const sg = inside(1) ? 1 : inside(-1) ? -1 : 0;
+        if (!sg) continue;
+        for (const o of openingsOf(b, w.id)) {
+          const door = isDoor(o);
+          if (door && !(o.kind === 'sliding' || o.kind === 'french' || o.kind === 'folding')) continue;
+          const c = add(w.a, scale(d, o.offset)), sill = door ? 0 : (o as { sill: number }).sill;
+          portals.push({ center: toThree({ x: c.x + n.x * sg * (w.thickness / 2 + 40), y: c.y + n.y * sg * (w.thickness / 2 + 40), z: lv.elevation + sill + o.height / 2 }), inward: new THREE.Vector3(n.x * sg, 0, -n.y * sg), width: o.width / 1000, height: o.height / 1000, levelId: lv.id });
+        }
+      }
+    }
+    if (spots.length) {
+      const disc = new THREE.CircleGeometry(0.055, 20);
+      disc.rotateX(Math.PI / 2);
+      const inst = new THREE.InstancedMesh(disc, material3d('slot-light', style), spots.length);
+      const m4 = new THREE.Matrix4();
+      spots.forEach((p, i) => inst.setMatrixAt(i, m4.makeTranslation(p.x, p.y, p.z)));
+      inst.userData.noPick = true;
+      group.add(inst);
     }
     rooms.sort((a, c) => c.area - a.area);
-    for (const r of rooms.slice(0, 10)) lights.push({ position: r.p, color: '#ffd7a3', power: 9, range: 7.5 });
+    for (const r of rooms) lights.push({ position: r.p, color: '#ffd7a3', power: 9, range: 7.5, roomId: r.id });
     if (view.context) addContext(group, foliage, doc, view);
   }
-  return { group, pickables, byRef, foliage, lights };
+  return { group, pickables, byRef, foliage, lights, portals };
 }
 
 /**
@@ -221,6 +272,15 @@ function addContext(group: THREE.Group, foliage: THREE.Object3D[], doc: ProjectD
     group.add(tree);
     placed++;
   }
+}
+
+const ceilings = new Map<string, THREE.Material>();
+/** Ceilings are single-sided (seen only from below), so cutaways and "hide upper levels" still look into the rooms. */
+function ceilingMaterial(id: string, style: RenderStyle): THREE.Material {
+  const key = `${id}|${style}`;
+  let m = ceilings.get(key);
+  if (!m) { m = material3d(id, style).clone(); m.side = THREE.FrontSide; m.userData = { ...material3d(id, style).userData }; ceilings.set(key, m); }
+  return m;
 }
 
 export function disposeGroup(g: THREE.Object3D) {

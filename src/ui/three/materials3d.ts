@@ -14,7 +14,7 @@ const matCache = new Map<string, THREE.Material>();
 /** How many pattern units one texture tile contains (so UV scale = patternScale × reps). */
 export const PATTERN_REPS: Record<MaterialPattern, number> = {
   wood: 4, plank: 4, tile: 4, brick: 4, marble: 1, stone: 3, grass: 1.6, water: 1, concrete: 1, 'tiles-roof': 6, none: 1,
-  gravel: 1, cobble: 8, herringbone: 4, crazy: 1, soil: 1, foliage: 1, asphalt: 2, plaster: 1.2,
+  gravel: 1, cobble: 8, herringbone: 4, crazy: 1, soil: 1, foliage: 1, asphalt: 2, plaster: 1.2, veneer: 1,
 };
 
 const PAPER = '#f4f2ee';
@@ -22,14 +22,20 @@ const PAPER = '#f4f2ee';
 // Materials whose glow follows the time of day.
 const glass = new Set<THREE.MeshPhysicalMaterial>();
 const lamps = new Set<THREE.MeshStandardMaterial>();
-let night = 0;
+let night = 0, inside = false, lampsOn = false;
+
+function applyGlow() {
+  // From outside, glazing reads dark and reflective by day and glows at night. From inside you
+  // look straight through it, and the glow would only wash out the view.
+  for (const g of glass) { g.emissiveIntensity = inside ? 0 : 0.85 * night; g.opacity = inside ? 0.14 + 0.1 * night : 0.5 + 0.3 * night; g.envMapIntensity = inside ? 1.2 : 5.5; }
+  for (const l of lamps) l.emissiveIntensity = 0.25 + 3.2 * Math.max(night, lampsOn ? 1 : 0);
+}
 
 /** 0 = full daylight, 1 = night. Windows glow from inside and lamps switch on. */
-export function setNight(f: number) {
-  night = f;
-  for (const g of glass) { g.emissiveIntensity = 0.85 * f; g.opacity = 0.5 + 0.3 * f; }
-  for (const l of lamps) l.emissiveIntensity = 0.25 + 3.2 * f;
-}
+export function setNight(f: number) { night = f; applyGlow(); }
+
+/** Walking inside: clear glazing, and the room lights can be switched on in daytime. */
+export function setInterior(on: boolean, lights: boolean) { inside = on; lampsOn = lights; applyGlow(); }
 
 /** Advance animated surfaces (water ripples). */
 export function tickMaterials(dt: number) {
@@ -37,6 +43,8 @@ export function tickMaterials(dt: number) {
   n.offset.x = (n.offset.x + dt * 0.012) % 1;
   n.offset.y = (n.offset.y + dt * 0.007) % 1;
 }
+
+let weave: THREE.Texture | null = null;
 
 const SLOT_PBR: Record<string, { roughness: number; metalness: number }> = {
   metal: { roughness: 0.38, metalness: 0.85 }, wood: { roughness: 0.62, metalness: 0 }, fabric: { roughness: 1, metalness: 0 },
@@ -72,7 +80,17 @@ export function material3d(id: string, style: RenderStyle, opts: { highlight?: b
       lamps.add(l); mat = l;
     } else if (slot || opts.color) {
       const pbr = SLOT_PBR[slot ?? ''] ?? { roughness: m.roughness, metalness: m.metalness };
-      mat = new THREE.MeshStandardMaterial({ color, roughness: pbr.roughness, metalness: pbr.metalness, side: THREE.DoubleSide, envMapIntensity: 0.9 });
+      const std = new THREE.MeshStandardMaterial({ color, roughness: pbr.roughness, metalness: pbr.metalness, side: THREE.DoubleSide, envMapIntensity: 0.9 });
+      // Furniture gets real surface character: grain on timber, a weave on upholstery, a tooth on stone.
+      if (slot === 'wood' || slot === 'trunk') {
+        const set = textureSet({ ...m, id: `furn-veneer-${color}`, color, pattern: 'veneer' }, 'veneer');
+        std.map = set.map; std.color.set('#ffffff'); std.normalMap = set.normalMap; std.normalScale = new THREE.Vector2(0.45, 0.45);
+      } else if (slot === 'fabric' || slot === 'stone' || slot === 'roof') {
+        const set = textureSet({ ...m, id: 'furn-weave', pattern: 'plaster' }, 'plaster', slot === 'fabric' ? 'furn-weave' : 'shared-plaster');
+        const nm = slot === 'fabric' ? (weave ??= (() => { const t = set.normalMap.clone(); t.repeat.set(5, 5); t.needsUpdate = true; return t; })()) : set.normalMap;
+        std.normalMap = nm; std.normalScale = new THREE.Vector2(slot === 'fabric' ? 0.9 : 0.4, slot === 'fabric' ? 0.9 : 0.4);
+      }
+      mat = std;
     } else {
       // Painted and plastered surfaces still get a fine trowel texture so light rakes across them.
       const pattern = m.pattern === 'none' ? (m.category === 'metal' || m.category === 'fabric' ? null : 'plaster') : (m.pattern as Exclude<MaterialPattern, 'none' | 'water'>);
@@ -103,7 +121,22 @@ export function material3d(id: string, style: RenderStyle, opts: { highlight?: b
     (mat as THREE.MeshStandardMaterial).emissiveIntensity = 0.45;
   }
   matCache.set(key, mat);
-  if ((isGlass && !slot) || isLamp) setNight(night);
+  if ((isGlass && !slot) || isLamp) applyGlow();
+  return mat;
+}
+
+/** Doors, frames and other joinery: timber finishes are shown as veneer with the grain running vertically. */
+export function joineryMaterial(id: string, style: RenderStyle): THREE.Material {
+  const m = getMaterial(id);
+  if (style !== 'realistic' || (m.pattern !== 'wood' && m.pattern !== 'plank')) return material3d(id, style);
+  const key = `joinery|${id}`;
+  let mat = matCache.get(key);
+  if (!mat) {
+    const set = textureSet({ ...m, id: `joinery-${id}`, pattern: 'veneer' }, 'veneer');
+    const std = new THREE.MeshStandardMaterial({ map: set.map, normalMap: set.normalMap, normalScale: new THREE.Vector2(0.5, 0.5), roughness: Math.min(0.6, m.roughness), metalness: 0, side: THREE.DoubleSide, envMapIntensity: 0.9 });
+    std.userData.repeatMm = 700;
+    mat = std; matCache.set(key, mat);
+  }
   return mat;
 }
 

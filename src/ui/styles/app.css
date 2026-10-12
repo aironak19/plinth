@@ -305,3 +305,14 @@ input[type='checkbox'] { accent-color: var(--accent); }
 /* 3D toolbar sits under the view switch; its labels give way to icons when the canvas is narrow. */
 @container (max-width: 1240px) { .v3d-bar .tb-l { display: none; } }
 .v3d-bar button:disabled { opacity: 0.4; pointer-events: none; }
+
+/* Interior walkthrough */
+.walkbar, .minimap { color: var(--ink); }
+.walkbar { top: 58px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 5px 6px; white-space: nowrap; }
+.walkbar .sep { width: 1px; height: 20px; background: var(--line); margin: 0 3px; }
+.walk-room { display: flex; flex-direction: column; align-items: center; min-width: 132px; padding: 0 6px; line-height: 1.2; }
+.walk-room b { font-weight: 650; font-size: 13px; }
+.minimap { right: 14px; bottom: 60px; padding: 8px; }
+.walk-hint { position: absolute; z-index: 9; left: 50%; top: 110px; animation: pop var(--t) var(--ease); transform: translateX(-50%); background: rgba(20, 20, 22, 0.72); color: #fff; padding: 6px 12px; border-radius: 99px; font-size: 11.5px; white-space: nowrap; display: flex; gap: 6px; align-items: center; backdrop-filter: blur(6px); pointer-events: none; }
+.walk-hint .kbd { background: transparent; color: inherit; border-color: rgba(255, 255, 255, 0.3); }
+@container (max-width: 900px) { .walk-hint { display: none; } .walkbar .btn.sm:not(.icon) { padding: 0 7px; } }

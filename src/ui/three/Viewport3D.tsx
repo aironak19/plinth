@@ -6,8 +6,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
-import { Camera, Footprints, Layers, Scissors, Sun as SunIcon, Bookmark, Orbit, ChevronDown, Download, Sparkles, SlidersHorizontal, X, Globe, Video, Moon, Sunrise, Sunset, CloudSun } from 'lucide-react';
+import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
+import { Camera, Footprints, Layers, DoorOpen, ChevronLeft, ChevronRight, Lightbulb, Armchair, ArrowUpDown, Scissors, Sun as SunIcon, Bookmark, Orbit, ChevronDown, Download, Sparkles, SlidersHorizontal, X, Globe, Video, Moon, Sunrise, Sunset, CloudSun } from 'lucide-react';
 import { useStore } from '../../state/store';
 import { useDoc, useRules, useBuilding, useLevels } from '../../state/derived';
 import { buildScene, disposeGroup, toThree, fromThree, type SceneResult } from './sceneBuilder';
@@ -21,18 +21,23 @@ import { createEnvironment, WEATHERS, type Environment } from './environment';
 import { createPost, QUALITIES, type Post } from './post';
 import { tickMaterials } from './materials3d';
 import { wind } from './vegetation';
+import { FirstPerson, buildNav, type NavLevel, type NavRoom, type WalkState } from './firstPerson';
+import { formatArea } from '../../core/units';
 
 type PathTracer = import('three-gpu-pathtracer').WebGLPathTracer;
-const NIGHT_LIGHTS = 14;
+const NIGHT_LIGHTS = 12;
+const SKY_PORTALS = 4;
+/** Window lights do more of the work when path tracing, where there is no fill light to lean on. */
+const PT_PORTAL = 1.5;
 
 const STYLES: { id: RenderStyle; label: string }[] = [
   { id: 'realistic', label: 'Realistic' }, { id: 'architectural', label: 'Architectural' }, { id: 'clay', label: 'Clay' },
   { id: 'sketch', label: 'Sketch' }, { id: 'xray', label: 'X-ray' }, { id: 'wireframe', label: 'Wireframe' }, { id: 'draft', label: 'Draft' },
 ];
 
-export interface Viewport3DProps { compact?: boolean; autoRotate?: boolean; present?: boolean; initialScene?: Scene | null }
+export interface Viewport3DProps { compact?: boolean; autoRotate?: boolean; present?: boolean; initialScene?: Scene | null; /** Presentation: start (and stay) in the interior walkthrough. */ tour?: boolean }
 
-export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewport3DProps) {
+export function Viewport3D({ compact, autoRotate, present, initialScene, tour }: Viewport3DProps) {
   const doc = useDoc();
   const b = useBuilding();
   const rules = useRules();
@@ -45,7 +50,7 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
   const mountRef = useRef<HTMLDivElement>(null);
   const view3d = useStore((s) => s.view3d);
   const ctx = useRef<{
-    renderer: THREE.WebGLRenderer; scene: THREE.Scene; camera: THREE.PerspectiveCamera; controls: OrbitControls; walk: PointerLockControls;
+    renderer: THREE.WebGLRenderer; scene: THREE.Scene; camera: THREE.PerspectiveCamera; controls: OrbitControls; fp: FirstPerson; portals: THREE.RectAreaLight[]; roomLamp: THREE.PointLight; orbitPose: { pos: THREE.Vector3; target: THREE.Vector3 } | null;
     env: Environment; post: Post; lamps: THREE.PointLight[]; content: SceneResult | null; raf: number; keys: Set<string>; clip: THREE.Plane;
     tracer: PathTracer | null; tracing: boolean; sky: { env: THREE.WebGLCubeRenderTarget; bg: THREE.WebGLCubeRenderTarget } | null;
   } | null>(null);
@@ -53,14 +58,24 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
   const [samples, setSamples] = useState(0);
   const [recording, setRecording] = useState(false);
   const [cutaway, setCutaway] = useState(false);
-  const [walking, setWalking] = useState(false);
+  const [walk, setWalk] = useState<WalkState | null>(null);
+  const [lightsOn, setLightsOn] = useState(false);
+  const [seated, setSeated] = useState(false);
+  const inside = !!walk;
+  // The how-to-move hint shows for a few seconds each time you step inside, then gets out of the way.
+  const [showHint, setShowHint] = useState(false);
+  useEffect(() => { if (!inside) return; setShowHint(true); const t = setTimeout(() => setShowHint(false), 9000); return () => clearTimeout(t); }, [inside]);
+  const nav = useMemo(() => buildNav(doc, b), [doc, b]);
+  const navRef = useRef(nav);
+  navRef.current = nav;
   const [showUpper, setShowUpper] = useState(true);
 
   const hidden = useMemo(() => {
     const h = new Set<string>();
-    if (!showUpper && levelId) { const idx = levels.findIndex((l) => l.id === levelId); levels.forEach((l, i) => { if (i > idx) h.add(l.id); }); }
+    // Indoors every level stays: the floor above is the ceiling's structure and blocks the sun.
+    if (!showUpper && levelId && !inside) { const idx = levels.findIndex((l) => l.id === levelId); levels.forEach((l, i) => { if (i > idx) h.add(l.id); }); }
     return h;
-  }, [showUpper, levelId, levels]);
+  }, [showUpper, levelId, levels, inside]);
   const selectedIds = useMemo(() => new Set(selection.map((r) => r.id)), [selection]);
 
   // ---- init renderer once
@@ -76,20 +91,31 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
     renderer.localClippingEnabled = true;
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 4000);
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.06, 4000);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.maxPolarAngle = Math.PI * 0.495;
     controls.screenSpacePanning = true;
-    const walk = new PointerLockControls(camera, renderer.domElement);
     const env = createEnvironment(renderer, scene);
     const post = createPost(renderer, scene, camera);
     // A fixed pool of lamps for night scenes; they are switched on only after dusk.
     const lamps = Array.from({ length: NIGHT_LIGHTS }, () => { const l = new THREE.PointLight('#ffd9a0', 0, 9, 1.6); l.visible = false; scene.add(l); return l; });
     const clip = new THREE.Plane(new THREE.Vector3(0, -1, 0), 1000);
     const keys = new Set<string>();
-    const state = { renderer, scene, camera, controls, walk, env, post, lamps, content: null as SceneResult | null, raf: 0, keys, clip, tracer: null as PathTracer | null, tracing: false, sky: null as { env: THREE.WebGLCubeRenderTarget; bg: THREE.WebGLCubeRenderTarget } | null };
+    // Daylight entering through the nearest windows, and one shadow-casting ceiling light for the room you are standing in.
+    RectAreaLightUniformsLib.init();
+    const portals = Array.from({ length: SKY_PORTALS }, () => { const l = new THREE.RectAreaLight('#cfe0ff', 0, 1, 1); l.visible = false; scene.add(l); return l; });
+    const roomLamp = new THREE.PointLight('#ffd9a8', 0, 11, 1.7);
+    roomLamp.castShadow = true; roomLamp.shadow.mapSize.set(1024, 1024); roomLamp.shadow.bias = -0.003; roomLamp.shadow.normalBias = 0.04; roomLamp.shadow.radius = 4;
+    roomLamp.shadow.camera.near = 0.15; roomLamp.shadow.camera.far = 12; roomLamp.visible = false;
+    scene.add(roomLamp);
+    const fp = new FirstPerson(camera, renderer.domElement, {
+      onState: (st) => setWalk(st),
+      onMove: () => { if (state.tracing) state.tracer?.updateCamera(); },
+      onExit: () => leaveRef.current(),
+    });
+    const state = { renderer, scene, camera, controls, fp, portals, roomLamp, orbitPose: null as { pos: THREE.Vector3; target: THREE.Vector3 } | null, env, post, lamps, content: null as SceneResult | null, raf: 0, keys, clip, tracer: null as PathTracer | null, tracing: false, sky: null as { env: THREE.WebGLCubeRenderTarget; bg: THREE.WebGLCubeRenderTarget } | null };
     ctx.current = state;
     if (import.meta.env.DEV) (window as unknown as { __plinth3d?: unknown }).__plinth3d = state;
     const resize = () => {
@@ -109,13 +135,7 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
     let lastSamples = -1;
     const loop = () => {
       const dt = Math.min(0.05, clock.getDelta());
-      if (walk.isLocked) {
-        const sp = (keys.has('ShiftLeft') ? 6 : 2.6) * dt;
-        if (keys.has('KeyW') || keys.has('ArrowUp')) walk.moveForward(sp);
-        if (keys.has('KeyS') || keys.has('ArrowDown')) walk.moveForward(-sp);
-        if (keys.has('KeyA') || keys.has('ArrowLeft')) walk.moveRight(-sp);
-        if (keys.has('KeyD') || keys.has('ArrowRight')) walk.moveRight(sp);
-      } else controls.update();
+      if (fp.active) fp.update(dt); else controls.update();
       if (state.tracing && state.tracer) {
         softSun(state);
         state.tracer.renderSample();
@@ -135,7 +155,7 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
     let down = { x: 0, y: 0 };
     const onDown = (e: PointerEvent) => { down = { x: e.clientX, y: e.clientY }; };
     const onUp = (e: PointerEvent) => {
-      if (walk.isLocked || state.tracing || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 || !state.content) return;
+      if (fp.active || state.tracing || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 || !state.content) return;
       const r = renderer.domElement.getBoundingClientRect();
       const ray = new THREE.Raycaster();
       ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
@@ -145,16 +165,23 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
     };
     renderer.domElement.addEventListener('pointerdown', onDown);
     renderer.domElement.addEventListener('pointerup', onUp);
-    const kd = (e: KeyboardEvent) => { if (walk.isLocked) { keys.add(e.code); e.stopPropagation(); } };
-    const ku = (e: KeyboardEvent) => keys.delete(e.code);
-    window.addEventListener('keydown', kd, true);
-    window.addEventListener('keyup', ku);
-    walk.addEventListener('unlock', () => { setWalking(false); controls.enabled = true; });
+    // Double-click a floor from outside to step into that room, right where you clicked.
+    const onDbl = (e: MouseEvent) => {
+      if (fp.active || state.tracing || !state.content) return;
+      const r = renderer.domElement.getBoundingClientRect();
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+      const hit = ray.intersectObjects(state.content.pickables, false).find((h) => h.object.userData.layer === 'floor');
+      if (!hit) return;
+      const p = fromThree(hit.point);
+      const lv = navRef.current.find((l) => l.id === hit.object.userData.levelId);
+      if (lv) enterRef.current(lv.id, { x: p.x, y: p.y }, Math.atan2(-(hit.point.z - camera.position.z), hit.point.x - camera.position.x));
+    };
+    renderer.domElement.addEventListener('dblclick', onDbl);
     return () => {
       cancelAnimationFrame(state.raf);
       ro.disconnect();
-      window.removeEventListener('keydown', kd, true);
-      window.removeEventListener('keyup', ku);
+      fp.dispose();
       if (state.content) disposeGroup(state.content.group);
       state.tracer?.dispose();
       state.sky?.env.dispose(); state.sky?.bg.dispose();
@@ -173,18 +200,19 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
     if (!c) return;
     const t0 = performance.now();
     if (c.content) { c.scene.remove(c.content.group); disposeGroup(c.content.group); }
-    c.content = buildScene(doc, b, rules, style, hidden, new Set(), { season: view3d.season, age: view3d.plantAge, context: view3d.context });
+    c.content = buildScene(doc, b, rules, style, hidden, new Set(), { season: view3d.season, age: view3d.plantAge, context: view3d.context, interior: inside });
     c.scene.add(c.content.group);
     highlight(c.content, selectedIdsRef.current);
     c.renderer.shadowMap.enabled = style !== 'sketch' && style !== 'wireframe' && style !== 'draft' && style !== 'xray';
     // Lamps and lit rooms, brightest first, share the fixed pool of night lights.
     const lights = [...c.content.lights].sort((x, y) => y.power - x.power);
-    c.lamps.forEach((l, i) => { const src = lights[i]; l.userData.power = src ? src.power : 0; if (src) { l.position.copy(src.position); l.color.set(src.color); l.distance = src.range; } });
+    c.lamps.forEach((l, i) => { const src = lights[i]; l.userData.power = src ? src.power : 0; l.userData.roomId = src?.roomId; if (src) { l.position.copy(src.position); l.color.set(src.color); l.distance = src.range; } });
+    c.fp.setNav(nav);
     setLightingTick((n) => n + 1);
     if (c.tracing) stopPhoto();
     if (import.meta.env.DEV) console.debug(`[plinth] 3D rebuild ${Math.round(performance.now() - t0)} ms`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc.site, b, rules, style, hidden, view3d.season, view3d.plantAge, view3d.context]);
+  }, [doc.site, b, rules, style, hidden, view3d.season, view3d.plantAge, view3d.context, inside]);
 
   // ---- selection highlight without rebuilding geometry
   const selectedIdsRef = useRef(selectedIds);
@@ -209,6 +237,7 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
 
   // ---- sun, sky, weather and night lighting
   const [lightingTick, setLightingTick] = useState(0);
+  const envKeyRef = useRef('');
   useEffect(() => {
     const c = ctx.current;
     if (!c) return;
@@ -222,31 +251,56 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
     // Below the horizon the astronomical vector points down; keep the sky's sun where it really is.
     const alt = (pos.altitude * Math.PI) / 180, az = Math.atan2(v.x, v.y);
     const dir = pos.altitude > 0 ? new THREE.Vector3(v.x, v.z, -v.y) : new THREE.Vector3(Math.sin(az) * Math.cos(alt), Math.sin(alt), -Math.cos(az) * Math.cos(alt));
-    c.env.update({ dir, altitude: pos.altitude, weather: view3d.weather, realistic, center, span, shadowSize: view3d.quality === 'fast' ? 2048 : 4096 });
+    // While a photoreal render is running, walking on only needs the lamps to follow; the sky set-up must stay put.
+    const envKey = `${sun.month}|${sun.day}|${sun.hour}|${view3d.weather}|${view3d.quality}|${style}|${inside}|${lightsOn}|${lightingTick}`;
+    const walkOnly = c.tracing && envKeyRef.current === envKey;
+    envKeyRef.current = envKey;
+    if (!walkOnly) c.env.update({ dir, altitude: pos.altitude, weather: view3d.weather, realistic, center, span, shadowSize: view3d.quality === 'fast' ? 2048 : 4096, interior: { on: inside, lights: lightsOn } });
     if (!realistic) {
       c.scene.background = new THREE.Color(style === 'sketch' || style === 'wireframe' ? '#fbfaf7' : style === 'architectural' ? '#f1f0ec' : style === 'xray' ? '#f5f6f8' : style === 'clay' ? '#e9e7e2' : '#eef1f4');
       c.scene.fog = null;
       c.renderer.toneMappingExposure = 1.05;
     }
     const night = c.env.night;
-    c.lamps.forEach((l) => { l.intensity = (l.userData.power as number ?? 0) * night; l.visible = night > 0.03 && l.intensity > 0; });
-    c.post.configure({ quality: view3d.quality, ao: realistic || style === 'clay' || style === 'architectural', night, hideInAO: c.content?.foliage ?? [] });
+    // Room lights: on after dark, or whenever you switch them on indoors. The room you are standing in
+    // is lit by one shadow-casting fitting so furniture grounds properly; the others are simple fills.
+    const lit = realistic ? Math.max(night, inside && lightsOn ? 1 : 0) : 0;
+    const here = walk?.room?.id;
+    const own = inside && here ? c.content?.lights.find((x) => x.roomId === here) : undefined;
+    c.lamps.forEach((l) => { const mine = !!own && l.userData.roomId === here; l.intensity = mine ? 0 : (l.userData.power as number ?? 0) * lit * (inside ? 0.22 : 1); l.visible = lit > 0.03 && l.intensity > 0; });
+    c.roomLamp.visible = !!own && lit > 0.03;
+    if (own) { c.roomLamp.position.copy(own.position); c.roomLamp.intensity = 4.6 * lit; }
+    // Sky light through the nearest glazing on this floor.
+    const eye = c.camera.position;
+    const near = inside && realistic ? (c.content?.portals ?? []).filter((p) => p.levelId === walk!.levelId).map((p) => ({ p, d: p.center.distanceTo(eye) })).filter((x) => x.d < 11).sort((x, y) => x.d - y.d) : [];
+    c.portals.forEach((l, i) => {
+      const src = near[i]?.p;
+      l.visible = inside && realistic;
+      l.intensity = src ? 2.1 * c.env.day * (view3d.weather === 'overcast' ? 0.75 : 1) * (c.tracing ? PT_PORTAL : 1) : 0;
+      if (!src) return;
+      l.color.copy(c.env.skyTint);
+      l.width = src.width; l.height = src.height;
+      l.position.copy(src.center).addScaledVector(src.inward, 0.05);
+      l.lookAt(src.center.clone().addScaledVector(src.inward, 1));
+    });
+    if (walkOnly) { c.tracer?.updateLights(); return; }
+    c.post.configure({ quality: view3d.quality, ao: realistic || style === 'clay' || style === 'architectural', night, hideInAO: c.content?.foliage ?? [], interior: inside });
     c.renderer.setPixelRatio(Math.min(view3d.quality === 'fast' ? 1.25 : 2, window.devicePixelRatio));
     const el = mountRef.current!;
     c.post.setSize(el.clientWidth || 800, el.clientHeight || 600, c.renderer.getPixelRatio());
     c.renderer.setSize(el.clientWidth || 800, el.clientHeight || 600, false);
     if (c.tracing) stopPhoto();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sun, doc.meta.location, doc.site, style, view3d.weather, view3d.quality, lightingTick]);
+  }, [sun, doc.meta.location, doc.site, style, view3d.weather, view3d.quality, lightingTick, inside, lightsOn, walk?.room?.id, walk?.levelId, Math.round((walk?.pos.x ?? 0) / 1500), Math.round((walk?.pos.y ?? 0) / 1500)]);
 
   // ---- cutaway (section at the active level)
   useEffect(() => {
     const c = ctx.current;
     if (!c) return;
     const lv = levelId ? b.levels[levelId] : undefined;
-    if (cutaway && lv) { c.clip.constant = (lv.elevation + 1300) / 1000; c.renderer.clippingPlanes = [c.clip]; }
+    if (cutaway && lv && !inside) { c.clip.constant = (lv.elevation + 1300) / 1000; c.renderer.clippingPlanes = [c.clip]; }
     else c.renderer.clippingPlanes = [];
-  }, [cutaway, levelId, b.levels]);
+  }, [cutaway, levelId, b.levels, inside]);
 
   // ---- external events: render, export, scenes
   useEffect(() => {
@@ -365,10 +419,18 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
       c.scene.remove(c.env.sky, ...c.env.extras);
       c.scene.environment = cubes.env.texture; c.scene.background = cubes.bg.texture; c.scene.fog = null;
       c.scene.backgroundIntensity = 1;
+      // Indoors the only light is what really comes through the glass and from the fittings, as in a
+      // photograph — so the camera opens up by several stops, and the view outside burns bright.
+      if (c.fp.active) { c.scene.userData.savedExposure = c.renderer.toneMappingExposure; c.scene.environmentIntensity = 0.12; c.renderer.toneMappingExposure *= 1.5; }
       c.renderer.clippingPlanes = [];
+      // Indoors the windows stay on as area lights (unseen by the camera): the tracer aims at them
+      // directly instead of waiting for rays to find the glass by chance, which clears the grain many times faster.
+      c.portals.forEach((l) => { if (c.fp.active) l.intensity *= PT_PORTAL; else l.visible = false; });
       if (!c.tracer) {
         c.tracer = new WebGLPathTracer(c.renderer);
-        c.tracer.bounces = 5; c.tracer.transmissiveBounces = 4; c.tracer.filterGlossyFactor = 0.5;
+        // bounces + transmissiveBounces must total at least 15: the tracer sizes its random-sample table from
+        // them, and a smaller table hands out constants that show up as a dither which never averages away.
+        c.tracer.bounces = 8; c.tracer.transmissiveBounces = 7; c.tracer.filterGlossyFactor = 0.5;
         c.tracer.tiles.set(2, 2); c.tracer.minSamples = 2; c.tracer.renderDelay = 60; c.tracer.fadeDuration = 250;
         c.tracer.dynamicLowRes = true; c.tracer.lowResScale = 0.2; c.tracer.multipleImportanceSampling = true;
         // An edge-preserving denoise on the way to the screen: clean walls and sky after tens of samples, not thousands.
@@ -378,8 +440,8 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
         tracer.renderToCanvasCallback = (target, renderer, quad) => {
           dm.map = target.texture; dm.opacity = (quad.material as THREE.Material).opacity;
           // Filter hard while the image is noisy, then back off so fine texture survives.
-          const k = Math.max(0, Math.min(1, 1 - tracer.samples / 400));
-          dm.sigma = 1.4 + 2.8 * k; dm.kSigma = 1.2; dm.threshold = 0.05 + 0.16 * k;
+          const k = Math.max(0, Math.min(1, 1 - tracer.samples / 700));
+          dm.sigma = 1.3 + 3.6 * k; dm.kSigma = 1.3; dm.threshold = 0.05 + 0.2 * k;
           const auto = renderer.autoClear; renderer.autoClear = false; denoise.render(renderer); renderer.autoClear = auto;
         };
       }
@@ -403,6 +465,7 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
     c.tracing = false;
     if (c.env.sun.userData.base) { c.env.sun.position.copy(c.env.sun.userData.base as THREE.Vector3); c.env.sun.userData.base = undefined; }
     const saved = c.scene.userData.saved as { env: THREE.Texture | null; bg: THREE.Scene['background']; fog: THREE.Scene['fog']; intensity: number } | undefined;
+    if (c.scene.userData.savedExposure) { c.renderer.toneMappingExposure = c.scene.userData.savedExposure as number; c.scene.userData.savedExposure = undefined; }
     if (saved) { c.scene.environment = saved.env; c.scene.background = saved.bg; c.scene.fog = saved.fog; c.scene.environmentIntensity = saved.intensity; c.scene.userData.saved = undefined; c.scene.add(c.env.sky, ...c.env.extras); }
     setPhoto('off');
     setLightingTick((n) => n + 1);
@@ -461,23 +524,81 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
     setTimeout(() => rec.stop(), 10_000);
   }
 
-  function startWalk() {
+  // ---- walking inside
+  function enterInside(levelId: string, p: { x: number; y: number }, yaw: number) {
     const c = ctx.current;
     if (!c) return;
-    const lv = (levelId && b.levels[levelId]) || levels[0];
-    const target = c.controls.target.clone();
-    c.camera.position.set(target.x, (lv.elevation + 1600) / 1000, target.z + 2);
-    c.camera.lookAt(target.x, (lv.elevation + 1600) / 1000, target.z);
+    if (style !== 'realistic') set('renderStyle', 'realistic');
+    if (!c.fp.active) c.orbitPose = { pos: c.camera.position.clone(), target: c.controls.target.clone() };
     c.controls.enabled = false;
-    c.walk.lock();
-    setWalking(true);
+    c.camera.fov = 68; c.camera.updateProjectionMatrix();
+    c.fp.eye = seated ? 1150 : 1600;
+    c.fp.setNav(nav);
+    c.fp.enter(levelId, p, yaw);
+    if (levelId !== useStore.getState().levelId) useStore.getState().setLevel(levelId);
   }
+  function enterRoom(room: NavRoom) { enterInside(room.levelId, room.entry.p, room.entry.yaw); }
+  function leaveInside() {
+    const c = ctx.current;
+    if (!c) return;
+    if (c.tracing) stopPhoto();
+    c.fp.exit();
+    c.controls.enabled = true;
+    c.camera.fov = 40; c.camera.updateProjectionMatrix();
+    if (c.orbitPose) { c.camera.position.copy(c.orbitPose.pos); c.controls.target.copy(c.orbitPose.target); c.controls.update(); c.orbitPose = null; }
+    setWalk(null);
+  }
+  const enterRef = useRef(enterInside); enterRef.current = enterInside;
+  const leaveRef = useRef(leaveInside); leaveRef.current = leaveInside;
+  const allRooms = useMemo(() => nav.flatMap((l) => l.rooms.filter((r) => r.tagId)), [nav]);
+  const stepRoom = (dir: 1 | -1) => {
+    if (!allRooms.length) return;
+    const i = allRooms.findIndex((r) => r.id === walk?.room?.id);
+    enterRoom(allRooms[(i + dir + allRooms.length) % allRooms.length]);
+  };
+  // A request from elsewhere in the app ("View inside" on a room, or the Inside button's default).
+  const insideRequest = useStore((s) => s.insideRequest);
+  useEffect(() => {
+    if (!insideRequest || !ctx.current) return;
+    const room = allRooms.find((r) => r.tagId === insideRequest.tagId) ?? allRooms.find((r) => r.fn === 'living') ?? allRooms.find((r) => r.fn === 'family' || r.fn === 'dining') ?? allRooms[0];
+    if (room) enterRoom(room); else useStore.getState().toast('Add a room first — then you can step inside it.');
+    set('insideRequest', null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insideRequest]);
+  useEffect(() => { const c = ctx.current; if (c?.fp.active) c.fp.eye = seated ? 1150 : 1600; }, [seated]);
+  // In a client presentation the walkthrough is a slide of its own.
+  useEffect(() => {
+    if (tour === undefined) return;
+    if (tour) set('insideRequest', { tagId: null, n: Date.now() }); else if (ctx.current?.fp.active) leaveRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tour]);
 
   const setView = (patch: Partial<typeof view3d>) => set('view3d', { ...view3d, ...patch });
   const tracing = photo === 'on';
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
       <div ref={mountRef} style={{ position: 'absolute', inset: 0 }} aria-label="3D model viewport" role="img" />
+      {inside && walk && (
+            <>
+              <div className="floating walkbar" role="toolbar" aria-label="Interior walkthrough">
+                <button className="btn ghost icon sm" aria-label="Previous room" onClick={() => stepRoom(-1)}><ChevronLeft size={15} /></button>
+                <div className="walk-room">
+                  <b>{walk.room?.name ?? 'Garden'}</b>
+                  <span className="tiny muted num">{walk.room ? `${formatArea(walk.room.area, doc.meta.units)} · ${nav.find((l) => l.id === walk.levelId)?.name ?? ''}` : 'Outside the house'}</span>
+                </div>
+                <button className="btn ghost icon sm" aria-label="Next room" onClick={() => stepRoom(1)}><ChevronRight size={15} /></button>
+                <span className="sep" />
+                <button className={`btn sm ${lightsOn ? 'active' : 'ghost'}`} aria-pressed={lightsOn} onClick={() => setLightsOn(!lightsOn)} title="Switch the room lights on or off"><Lightbulb size={14} /> Lights</button>
+                <button className={`btn sm ${seated ? 'active' : 'ghost'}`} aria-pressed={seated} onClick={() => setSeated(!seated)} title="See the room from a sofa or a bed (3 ft 9 in eye level) instead of standing (5 ft 3 in)"><Armchair size={14} /> Seated</button>
+                {nav.filter((l) => l.rooms.some((r) => r.tagId)).length > 1 && (
+                  <button className="btn sm ghost" title="Go to the next floor" onClick={() => { const ls = nav.filter((l) => l.rooms.some((r) => r.tagId)); const next = ls[(ls.findIndex((l) => l.id === walk.levelId) + 1) % ls.length]; const stair = next.rooms.find((r) => r.fn === 'stair' || r.fn === 'corridor' || r.fn === 'family') ?? next.rooms.find((r) => r.tagId); if (stair) enterRoom(stair); }}><ArrowUpDown size={14} /> Floor</button>
+                )}
+                {!tour && <><span className="sep" /><button className="btn sm" onClick={leaveInside}><DoorOpen size={14} /> Exit</button></>}
+              </div>
+              <MiniMap level={nav.find((l) => l.id === walk.levelId)} walk={walk} onGo={(p) => { const c = ctx.current; if (c) c.fp.enter(walk.levelId, p, walk.yaw); }} />
+              {photo === 'off' && showHint && <div className="walk-hint"><b>Drag</b> to look around · <span className="kbd">W</span><span className="kbd">A</span><span className="kbd">S</span><span className="kbd">D</span> or arrows to walk · <b>click the floor</b> to go there · <span className="kbd">Esc</span> exits</div>}
+            </>
+          )}
       {!present && (
         <>
           <div className="floating ctxbar v3d-bar" style={{ top: 12, left: 12, transform: 'none', animation: 'none' }}>
@@ -496,9 +617,22 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
               )}
             </Popover>
             <span className="sep" />
-            <button aria-pressed={cutaway} disabled={tracing} style={cutaway ? { color: 'var(--accent)' } : undefined} onClick={() => setCutaway(!cutaway)} title="Cut the model above the active level"><Scissors size={14} />{!compact && <span className="tb-l"> Section</span>}</button>
-            <button style={!showUpper ? { color: 'var(--accent)' } : undefined} onClick={() => setShowUpper(!showUpper)} title="Hide levels above the active level"><Layers size={14} />{!compact && <span className="tb-l"> Upper levels</span>}</button>
-            <button onClick={startWalk} disabled={tracing} title="Walk through (WASD, mouse to look, Esc to exit)"><Footprints size={14} />{!compact && <span className="tb-l"> Walk</span>}</button>
+            <button aria-pressed={cutaway} disabled={tracing || inside} style={cutaway ? { color: 'var(--accent)' } : undefined} onClick={() => setCutaway(!cutaway)} title="Cut the model above the active level"><Scissors size={14} />{!compact && <span className="tb-l"> Section</span>}</button>
+            <button disabled={inside} style={!showUpper ? { color: 'var(--accent)' } : undefined} onClick={() => setShowUpper(!showUpper)} title="Hide levels above the active level"><Layers size={14} />{!compact && <span className="tb-l"> Upper levels</span>}</button>
+            <Popover anchor={<button aria-pressed={inside} style={inside ? { color: 'var(--accent)' } : undefined} title="Step inside and walk through the rooms"><Footprints size={14} />{!compact && <span className="tb-l"> Inside</span>}</button>}>
+              {(close) => (
+                <div style={{ width: 250, maxHeight: 420, overflow: 'auto' }}>
+                  {inside && <><button onClick={() => { close(); leaveInside(); }}><DoorOpen size={14} /> Back outside</button><div className="sep" /></>}
+                  {nav.map((lv) => lv.rooms.some((r) => r.tagId) && (
+                    <div key={lv.id}>
+                      <div className="caps" style={{ padding: '6px 10px 3px' }}>{lv.name}</div>
+                      {lv.rooms.filter((r) => r.tagId).map((r) => <button key={r.id} style={walk?.room?.id === r.id ? { color: 'var(--accent)' } : undefined} onClick={() => { close(); enterRoom(r); }}><span className="grow">{r.name}</span><span className="tiny muted num">{formatArea(r.area, doc.meta.units)}</span></button>)}
+                    </div>
+                  ))}
+                  {!allRooms.length && <div className="small muted" style={{ padding: 10 }}>Add a room, then step inside it here.</div>}
+                </div>
+              )}
+            </Popover>
             <span className="sep" />
             <Popover anchor={<button title="Saved scenes"><Bookmark size={14} />{!compact && <span className="tb-l">{` Scenes (${doc.scenes.length})`}</span>}</button>}>
               {(close) => (
@@ -524,7 +658,7 @@ export function Viewport3D({ compact, autoRotate, present, initialScene }: Viewp
             </Popover>
           </div>
           {!compact && <SunControl />}
-          {walking && <div className="hint">Walking · <span className="kbd">W</span><span className="kbd">A</span><span className="kbd">S</span><span className="kbd">D</span> to move · <span className="kbd">Shift</span> faster · <span className="kbd">Esc</span> to exit</div>}
+
           {recording && <div className="hint"><span style={{ width: 8, height: 8, borderRadius: 4, background: '#e5484d', display: 'inline-block' }} /> Recording a 10-second turntable…</div>}
           {photo !== 'off' && (
             <div className="hint" style={{ pointerEvents: 'auto' }}>
@@ -561,6 +695,28 @@ function softSun(state: { tracer: PathTracer | null; env: Environment; scene: TH
   state.scene.traverseVisible((o) => { const l = o as THREE.Light & { isRectAreaLight?: boolean; isSpotLight?: boolean; isPointLight?: boolean; isDirectionalLight?: boolean }; if (l.isRectAreaLight || l.isSpotLight || l.isPointLight || l.isDirectionalLight) lights.push(o); });
   lights.sort((x, y) => (x.uuid < y.uuid ? 1 : x.uuid > y.uuid ? -1 : 0));
   mat.lights.updateFrom(lights, []);
+}
+
+/** Where you are in the house: the floor you are on, the room you are in and the way you are facing. Click to jump. */
+function MiniMap({ level, walk, onGo }: { level: NavLevel | undefined; walk: WalkState; onGo: (p: { x: number; y: number }) => void }) {
+  if (!level || !level.rooms.length) return null;
+  const pts = level.rooms.flatMap((r) => r.polygon);
+  const minX = Math.min(...pts.map((p) => p.x)), maxX = Math.max(...pts.map((p) => p.x)), minY = Math.min(...pts.map((p) => p.y)), maxY = Math.max(...pts.map((p) => p.y));
+  const pad = 900, w = maxX - minX + pad * 2, h = maxY - minY + pad * 2;
+  const W = 190, H = Math.max(110, Math.min(230, (W * h) / w));
+  const d = (poly: { x: number; y: number }[]) => `M${poly.map((p) => `${Math.round(p.x)} ${Math.round(-p.y)}`).join('L')}Z`;
+  const cone = 2600, a0 = walk.yaw - 0.55, a1 = walk.yaw + 0.55;
+  return (
+    <div className="floating minimap" style={{ width: W + 16 }}>
+      <svg width={W} height={H} viewBox={`${minX - pad} ${-(maxY + pad)} ${w} ${h}`} role="img" aria-label={`Floor map — you are in ${walk.room?.name ?? 'the garden'}`} style={{ cursor: 'pointer', display: 'block' }}
+        onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); const k = Math.max(w / r.width, h / r.height), ox = (r.width - w / k) / 2, oy = (r.height - h / k) / 2; onGo({ x: minX - pad + (e.clientX - r.left - ox) * k, y: maxY + pad - (e.clientY - r.top - oy) * k }); }}>
+        {level.rooms.map((r) => <path key={r.id} d={d(r.polygon)} fill={r.id === walk.room?.id ? 'var(--accent-soft)' : 'var(--paper)'} stroke="var(--ink-3)" strokeWidth={70} />)}
+        <path d={`M${walk.pos.x} ${-walk.pos.y}L${walk.pos.x + Math.cos(a0) * cone} ${-(walk.pos.y + Math.sin(a0) * cone)}A${cone} ${cone} 0 0 0 ${walk.pos.x + Math.cos(a1) * cone} ${-(walk.pos.y + Math.sin(a1) * cone)}Z`} fill="var(--accent)" fillOpacity={0.28} />
+        <circle cx={walk.pos.x} cy={-walk.pos.y} r={260} fill="var(--accent)" stroke="#fff" strokeWidth={90} />
+      </svg>
+      <div className="tiny muted" style={{ textAlign: 'center', marginTop: 3 }}>{level.name} · click to jump</div>
+    </div>
+  );
 }
 
 function Seg<T extends string>({ label, value, options, onChange, hint }: { label: string; value: T; options: { id: T; label: string }[]; onChange: (v: T) => void; hint?: string }) {

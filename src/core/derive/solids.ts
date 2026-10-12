@@ -19,7 +19,7 @@ export interface Face3 { outer: Vec3[]; holes?: Vec3[][]; normal: Vec3 }
 
 export type SolidLayer =
   | 'wall' | 'slab' | 'floor' | 'roof' | 'stair' | 'door' | 'frame' | 'glass' | 'column' | 'beam'
-  | 'site' | 'ground' | 'road' | 'water' | 'parapet' | 'gable' | 'landscape';
+  | 'site' | 'ground' | 'road' | 'water' | 'parapet' | 'gable' | 'landscape' | 'ceiling';
 
 export interface Solid {
   id: string;
@@ -58,7 +58,9 @@ export function boxFaces(o: Vec2, u: Vec2, lu: number, lv: number, z0: number, z
   return prismFaces([p0, p1, p2, p3], z0, z1, { bottom: true });
 }
 
-export interface SolidOptions { hiddenLevels?: Set<Id>; includeSite?: boolean; includeOpenings?: boolean }
+export interface SolidOptions { hiddenLevels?: Set<Id>; includeSite?: boolean; includeOpenings?: boolean   /** Draw hinged doors standing open and sliding doors slid back — used when walking through the interior. */
+  doorsOpen?: boolean;
+}
 
 export function buildSolids(doc: ProjectDoc, b: BuildingModel, rules: RuleSet, opts: SolidOptions = {}): Solid[] {
   const out: Solid[] = [];
@@ -68,9 +70,9 @@ export function buildSolids(doc: ProjectDoc, b: BuildingModel, rules: RuleSet, o
     const dl = deriveLevel(b, level.id);
     const above = levelAbove(b, level.id);
     const topGap = above ? above.slabThickness : 0;
-    buildWalls(out, b, level, dl, topGap, opts.includeOpenings !== false);
+    buildWalls(out, b, level, dl, topGap, opts.includeOpenings !== false, !!opts.doorsOpen);
     buildSlab(out, b, level, dl, levels);
-    buildFloors(out, b, level, dl);
+    buildFloors(out, b, level, dl, topGap);
     buildStairs(out, b, level, rules, above);
     buildColumns(out, b, level, topGap);
   }
@@ -118,7 +120,7 @@ function wallExteriorMaterial(b: BuildingModel, levelId: Id): string {
   return ext?.finishExteriorId ?? 'ext-texture';
 }
 
-function buildWalls(out: Solid[], b: BuildingModel, level: Level, dl: DerivedLevel, topGap: number, withOpenings: boolean) {
+function buildWalls(out: Solid[], b: BuildingModel, level: Level, dl: DerivedLevel, topGap: number, withOpenings: boolean, doorsOpen: boolean) {
   for (const w of dl.walls) {
     const ol = dl.outlines.get(w.id);
     if (!ol) continue;
@@ -159,11 +161,11 @@ function buildWalls(out: Solid[], b: BuildingModel, level: Level, dl: DerivedLev
     out.push({ id: `wall-${w.id}-L`, ref, levelId: level.id, materialId: sides.left.finishId, layer: 'wall', faces: [leftFace] });
     out.push({ id: `wall-${w.id}-R`, ref, levelId: level.id, materialId: sides.right.finishId, layer: 'wall', faces: [rightFace] });
     out.push({ id: `wall-${w.id}-C`, ref, levelId: level.id, materialId: sides.left.exterior || sides.right.exterior ? w.finishExteriorId : w.finishInteriorId, layer: 'wall', faces: core });
-    if (withOpenings) for (const o of ops) buildOpening(out, w, o, level, z0, z1);
+    if (withOpenings) for (const o of ops) buildOpening(out, w, o, level, z0, z1, doorsOpen);
   }
 }
 
-function buildOpening(out: Solid[], w: Wall, o: Door | Window, level: Level, z0: number, z1: number) {
+function buildOpening(out: Solid[], w: Wall, o: Door | Window, level: Level, z0: number, z1: number, doorsOpen = false) {
   const d = norm(sub(w.b, w.a));
   const n = perp(d);
   const s0 = o.offset - o.width / 2;
@@ -186,9 +188,25 @@ function buildOpening(out: Solid[], w: Wall, o: Door | Window, level: Level, z0:
     const dd = o as Door;
     if (dd.kind === 'opening') return;
     const glassDoor = dd.kind === 'sliding' || dd.kind === 'french' || dd.kind === 'folding';
-    const leafFaces = boxFaces(P(s0 + frame, -20), d, o.width - 2 * frame, 40, zb, zt - frame);
+    const clear = o.width - 2 * frame, top = zt - frame;
+    let leafFaces: Face3[];
+    if (!doorsOpen) leafFaces = boxFaces(P(s0 + frame, -20), d, clear, 40, zb, top);
+    else if (dd.kind === 'sliding' || dd.kind === 'pocket' || dd.kind === 'folding') {
+      // Slid (or folded) back: one fixed panel remains, the rest of the opening is clear to walk through.
+      const stay = dd.kind === 'folding' ? clear * 0.18 : dd.kind === 'pocket' ? 60 : clear / 2;
+      leafFaces = boxFaces(P(dd.hinge === 'end' ? s0 + o.width - frame - stay : s0 + frame, -20), d, stay, 40, zb, top);
+    } else {
+      // Hinged leaves stand at right angles to the wall, on the side they swing into.
+      const sgn = dd.side === 'left' ? 1 : -1;
+      const leaf = (hingeS: number, len: number, flip: boolean): Face3[] => {
+        const h0 = flip ? hingeS - 40 : hingeS, h1 = h0 + 40;
+        return prismFaces([P(h0, sgn * 20), P(h1, sgn * 20), P(h1, sgn * (20 + len)), P(h0, sgn * (20 + len))], zb, top, { bottom: true });
+      };
+      const two = dd.kind === 'double' || dd.kind === 'french';
+      leafFaces = two ? [...leaf(s0 + frame, clear / 2, false), ...leaf(s0 + o.width - frame, clear / 2, true)] : leaf(dd.hinge === 'end' ? s0 + o.width - frame : s0 + frame, clear, dd.hinge === 'end');
+    }
     out.push({ id: `door-${o.id}-leaf`, ref, levelId: level.id, materialId: glassDoor ? 'glass' : dd.materialId, layer: glassDoor ? 'glass' : 'door', faces: leafFaces });
-    if (glassDoor) {
+    if (glassDoor && !doorsOpen) {
       const mullion = boxFaces(P(o.offset - 25, -30), d, 50, 60, zb, zt - frame);
       out.push({ id: `door-${o.id}-mullion`, ref, levelId: level.id, materialId: frameMat, layer: 'frame', faces: mullion });
     }
@@ -225,14 +243,29 @@ function buildSlab(out: Solid[], b: BuildingModel, level: Level, dl: DerivedLeve
   out.push({ id: `slab-${level.id}`, levelId: level.id, materialId: 'rcc', layer: 'slab', faces });
 }
 
-function buildFloors(out: Solid[], b: BuildingModel, level: Level, dl: DerivedLevel) {
+/** Rooms open to the sky: they get a floor but no ceiling. */
+const OPEN_AIR = new Set(['balcony', 'deck', 'parking']);
+
+/** Finished ceiling height of a room above its floor, mm. */
+export function ceilingHeightOf(level: Level, topGap: number, tagHeight: number | null | undefined): number {
+  const structural = level.height - topGap;
+  return Math.max(2100, Math.min(structural, tagHeight ?? structural)) - 6;
+}
+
+function buildFloors(out: Solid[], b: BuildingModel, level: Level, dl: DerivedLevel, topGap: number) {
   for (const r of dl.rooms) {
     const tag = r.tagId ? b.rooms[r.tagId] : undefined;
     const mat = tag?.floorFinishId ?? 'vitrified';
+    const poly = ensureCCW(r.polygon);
     out.push({
       id: `floor-${r.id}`, ref: tag ? { kind: 'room', id: tag.id } : undefined, levelId: level.id, materialId: mat, layer: 'floor',
-      faces: [face(ensureCCW(r.polygon).map((p) => lift(p, level.elevation + 4)))],
+      faces: [face(poly.map((p) => lift(p, level.elevation + 4)))],
     });
+    // A finished ceiling, facing down into the room. It is drawn one-sided, so looking down
+    // into a floor from above (upper levels hidden, cutaway) still shows the room.
+    if (OPEN_AIR.has(r.fn)) continue;
+    const z = level.elevation + ceilingHeightOf(level, topGap, tag?.ceilingHeight);
+    out.push({ id: `ceiling-${r.id}`, levelId: level.id, materialId: tag?.ceilingFinishId ?? 'plaster-white', layer: 'ceiling', faces: [face([...poly].reverse().map((p) => lift(p, z)))] });
   }
 }
 

@@ -69,6 +69,8 @@ interface State {
   sun: { month: number; day: number; hour: number };
   /** How the 3D view is lit and dressed — a view setting, not part of the model. */
   view3d: { weather: 'clear' | 'cloudy' | 'overcast' | 'haze'; quality: 'fast' | 'balanced' | 'high'; season: 'spring' | 'summer' | 'autumn' | 'winter'; plantAge: number; context: boolean };
+  /** Ask the 3D view to step inside a room (tag id), or the main living space when null. `n` makes repeat requests distinct. */
+  insideRequest: { tagId: Id | null; n: number } | null;
   layers: { furniture: boolean; dimensions: boolean; site: boolean; underlay: boolean; issues: boolean; comments: boolean; levelBelow: boolean; grid: boolean };
   snap: { grid: boolean; endpoints: boolean; ortho: boolean };
   focus: { point: { x: number; y: number }; levelId?: Id; at: number } | null;
@@ -111,6 +113,8 @@ interface Actions {
   startBlock(blockId: string, size: string): void;
   startSite(spec: PlaceSite): void;
   startPlant(assetId: string): void;
+  /** Switch to 3D and walk into a room. */
+  viewInside(tagId?: Id | null): void;
   setSimpleMode(v: boolean): void;
   saveNow(): Promise<void>;
 }
@@ -156,6 +160,7 @@ export const useStore = create<Store>((setState, getState) => ({
   renderStyle: 'realistic',
   sun: { month: 1, day: 15, hour: 10 },
   view3d: { weather: 'clear', quality: 'balanced', season: 'summer', plantAge: 1, context: true },
+  insideRequest: null,
   layers: { furniture: true, dimensions: true, site: true, underlay: true, issues: true, comments: true, levelBelow: true, grid: true },
   snap: { grid: true, endpoints: true, ortho: true },
   focus: null,
@@ -327,6 +332,7 @@ export const useStore = create<Store>((setState, getState) => ({
     const ground = b ? Object.values(b.levels).sort((x, y) => x.order - y.order).find((l) => l.elevation >= 0) ?? Object.values(b.levels)[0] : null;
     setState({ tool: LINEAR_FEATURES.includes(spec.kind) ? 'linear' : 'surface', placeSite: spec, placeAsset: null, placeBlock: null, selection: [], view: st.view === '3d' ? 'plan' : st.view, levelId: ground?.id ?? st.levelId, layers: { ...st.layers, site: true } });
   },
+  viewInside(tagId = null) { const st = getState(); setState({ view: '3d', renderStyle: 'realistic', tool: 'select', insideRequest: { tagId, n: (st.insideRequest?.n ?? 0) + 1 } }); },
   startPlant(assetId) {
     const st = getState();
     const b = st.doc ? activeBuilding(st.doc) : null;

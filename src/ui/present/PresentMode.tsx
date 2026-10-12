@@ -3,7 +3,7 @@
  * the materials and the options, with approve / request-changes built in.
  * Anyone can navigate it with the arrow keys or the buttons below.
  */
-import { useEffect, useMemo, useState, lazy, Suspense } from 'react';
+import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
 import { X, ChevronLeft, ChevronRight, Check, MessageSquare, Pause, Play } from 'lucide-react';
 import { useStore } from '../../state/store';
 import { useBuilding, useDoc, useSite, useLevels, useCost, useHealth } from '../../state/derived';
@@ -16,7 +16,7 @@ import type { Scene } from '../../core/model/types';
 
 const Viewport3D = lazy(() => import('../three/Viewport3D'));
 
-type Slide = { kind: 'hero' } | { kind: 'scene'; scene: Scene } | { kind: 'plan'; levelId: string } | { kind: 'materials' } | { kind: 'options' } | { kind: 'approve' };
+type Slide = { kind: 'hero' } | { kind: 'inside' } | { kind: 'scene'; scene: Scene } | { kind: 'plan'; levelId: string } | { kind: 'materials' } | { kind: 'options' } | { kind: 'approve' };
 
 export default function PresentMode() {
   const doc = useDoc();
@@ -35,18 +35,23 @@ export default function PresentMode() {
 
   const slides: Slide[] = useMemo(() => [
     { kind: 'hero' },
+    ...(Object.keys(b.rooms).length ? [{ kind: 'inside' as const }] : []),
     ...doc.scenes.map((scene) => ({ kind: 'scene' as const, scene })),
     ...levels.filter((l) => Object.values(b.walls).some((w) => w.levelId === l.id)).map((l) => ({ kind: 'plan' as const, levelId: l.id })),
     { kind: 'materials' },
     ...(doc.options.length > 1 ? [{ kind: 'options' as const }] : []),
     { kind: 'approve' },
-  ], [doc.scenes, levels, b.walls, doc.options.length]);
+  ], [doc.scenes, levels, b.walls, b.rooms, doc.options.length]);
   const slide = slides[Math.min(i, slides.length - 1)];
+  const slideKind = useRef(slide.kind);
+  slideKind.current = slide.kind;
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
       if (e.key === 'Escape') set('presentOpen', false);
+      // On the walkthrough slide the arrow keys walk; use the buttons to change slide.
+      if (slideKind.current === 'inside') return;
       if (e.key === 'ArrowRight' || e.key === ' ') setI((x) => Math.min(slides.length - 1, x + 1));
       if (e.key === 'ArrowLeft') setI((x) => Math.max(0, x - 1));
     };
@@ -57,7 +62,7 @@ export default function PresentMode() {
   useEffect(() => { if (slide.kind === 'scene') setTimeout(() => window.dispatchEvent(new CustomEvent('plinth:applyScene', { detail: slide.scene })), 60); }, [slide]);
 
   const bedrooms = Object.values(b.rooms).filter((r) => r.fn === 'bedroom' || r.fn === 'master_bedroom').length;
-  const show3d = slide.kind === 'hero' || slide.kind === 'scene';
+  const show3d = slide.kind === 'hero' || slide.kind === 'scene' || slide.kind === 'inside';
   const pending = doc.approvals.find((a) => a.decision === 'pending');
 
   const decide = (decision: 'approved' | 'changes_requested') => {
@@ -77,7 +82,7 @@ export default function PresentMode() {
       </div>
 
       <div style={{ position: 'absolute', inset: 0 }}>
-        {show3d && <Suspense fallback={null}><Viewport3D present autoRotate={slide.kind === 'hero' && spin} /></Suspense>}
+        {show3d && <Suspense fallback={null}><Viewport3D present autoRotate={slide.kind === 'hero' && spin} tour={slide.kind === 'inside'} /></Suspense>}
         {slide.kind === 'plan' && <PlanSlide levelId={slide.levelId} />}
         {slide.kind === 'materials' && <MaterialsSlide />}
         {slide.kind === 'options' && <OptionsSlide />}
@@ -103,7 +108,7 @@ export default function PresentMode() {
       {slide.kind === 'scene' && <div style={{ position: 'absolute', left: 24, bottom: 78, zIndex: 5, fontSize: 15, fontWeight: 600, textShadow: '0 1px 8px rgba(0,0,0,0.6)' }}>{slide.scene.name}</div>}
       <div className="present-bottom">
         <button className="pbtn" onClick={() => setI(Math.max(0, i - 1))} aria-label="Previous"><ChevronLeft size={16} /></button>
-        {slides.map((s, k) => <button key={k} className="pbtn" aria-pressed={k === i} onClick={() => setI(k)} style={{ padding: '0 11px' }}>{s.kind === 'hero' ? 'Overview' : s.kind === 'scene' ? s.scene.name.replace(/^Scene \d+ — /, '') : s.kind === 'plan' ? levels.find((l) => l.id === s.levelId)?.name : s.kind === 'materials' ? 'Materials' : s.kind === 'options' ? 'Options' : 'Approve'}</button>)}
+        {slides.map((s, k) => <button key={k} className="pbtn" aria-pressed={k === i} onClick={() => setI(k)} style={{ padding: '0 11px' }}>{s.kind === 'hero' ? 'Overview' : s.kind === 'inside' ? 'Walk inside' : s.kind === 'scene' ? s.scene.name.replace(/^Scene \d+ — /, '') : s.kind === 'plan' ? levels.find((l) => l.id === s.levelId)?.name : s.kind === 'materials' ? 'Materials' : s.kind === 'options' ? 'Options' : 'Approve'}</button>)}
         <button className="pbtn" onClick={() => setI(Math.min(slides.length - 1, i + 1))} aria-label="Next"><ChevronRight size={16} /></button>
         {slide.kind === 'hero' && <button className="pbtn" onClick={() => setSpin(!spin)} aria-label={spin ? 'Pause rotation' : 'Rotate'}>{spin ? <Pause size={14} /> : <Play size={14} />}</button>}
       </div>
